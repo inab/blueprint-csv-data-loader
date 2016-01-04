@@ -16,7 +16,7 @@ use constant DEFAULT_WP10_TYPE	=>	'qtl';
 use constant BULK_WP10_TYPE	=>	'bulkqtl';
 
 use constant DATA_FILETYPE	=>	'data';
-use constant SQLT_FILETYPE	=>	'sqtl';
+use constant SQTL_FILETYPE	=>	'sqtl';
 use constant BULK_FILETYPE	=>	'bulk';
 
 my %QTL_TYPES = (
@@ -245,6 +245,8 @@ if(scalar(@ARGV)>=2) {
 	
 	# The connection
 	my $es = Search::Elasticsearch->new(@connParams,'nodes' => $confValues{nodes});
+	# Setting up the parameters to the JSON serializer
+	$es->transport->serializer->JSON->convert_blessed;
 	
 	my $indexName = DEFAULT_WP10_INDEX;
 
@@ -275,7 +277,7 @@ if(scalar(@ARGV)>=2) {
 		my $geneIdKey;
 		my $snpIdKey;
 		
-		if($basename =~ /^([^_]+)[_.]([^_])_(.+)_summary\.hdf5\.txt$/) {
+		if($basename =~ /^([^_.]+)[_.]([^_]+)_(.+)_summary\.hdf5\.txt$/) {
 			$mappingName = DEFAULT_WP10_TYPE;
 			$cell_type = $1;
 			$qtl_source = $2;
@@ -283,7 +285,7 @@ if(scalar(@ARGV)>=2) {
 			$fileType = DATA_FILETYPE;
 			$geneIdKey = 'geneID';
 			$snpIdKey = 'rs';
-		} elsif($basename =~ /^([^_]+)[_.]([^_])_(.+)_all_summary\.txt$/) {
+		} elsif($basename =~ /^([^_.]+)[_.]([^_]+)_(.+)_all_summary\.txt$/) {
 			$mappingName = BULK_WP10_TYPE;
 			$cell_type = $1;
 			$qtl_source = $2;
@@ -292,12 +294,12 @@ if(scalar(@ARGV)>=2) {
 			$fileType = BULK_FILETYPE;
 			$geneIdKey = 'geneID';
 			$snpIdKey = 'rs';
-		} elsif($basename =~ /^([^_]+)\.(sqtls)\.sig5\.tsv$/) {
+		} elsif($basename =~ /^([^.]+)\.([^.]+)\.sig5\.tsv$/) {
 			$mappingName = DEFAULT_WP10_TYPE;
 			$cell_type = $1;
 			$qtl_source = $2;
 			$colSep = qr/\t/;
-			$fileType = SQLT_FILETYPE;
+			$fileType = SQTL_FILETYPE;
 			$geneIdKey = 'geneId';
 			$snpIdKey = 'snpId';
 		} else {
@@ -305,8 +307,8 @@ if(scalar(@ARGV)>=2) {
 			next;
 		}
 		
+		print "[INFO] Processing $file (cell type $cell_type, type $fileType, source $qtl_source)\n";
 		if(open(my $CSV,'<:encoding(UTF-8)',$file)) {
-			print "* Processing $file\n";
 			
 			my @bes_params = (
 				index   => $indexName,
@@ -408,7 +410,7 @@ if(scalar(@ARGV)>=2) {
 							$entry{'histone'} = 'H3'.$data{$geneIdKey};
 						}
 						
-					} elsif($fileType eq SQLT_FILETYPE) {
+					} elsif($fileType eq SQTL_FILETYPE) {
 						$entry{'pv'} = $data{'pv'}+0E0;
 						$entry{'qv'} = $data{'qv'}+0E0;
 						$entry{'F'} = $data{'F'}+0E0;
