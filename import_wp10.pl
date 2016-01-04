@@ -191,6 +191,12 @@ if(scalar(@ARGV) > 0 && $ARGV[0] eq '-C') {
 	shift(@ARGV);
 }
 
+my $doSimul = undef;
+if(scalar(@ARGV) > 0 && $ARGV[0] eq '-s') {
+	$doClean = 1;
+	shift(@ARGV);
+}
+
 if(scalar(@ARGV)>=2) {
 	# First, let's read the configuration
 	my $iniFile = shift(@ARGV);
@@ -320,7 +326,7 @@ if(scalar(@ARGV)>=2) {
 			my $bes = $es->bulk_helper(@bes_params);
 
 			unless(defined($colsLine)) {
-				my $colsLine = <$CSV>;
+				$colsLine = <$CSV>;
 				chomp($colsLine);
 			}
 			my @cols = split($colSep,$colsLine,-1);
@@ -361,7 +367,7 @@ if(scalar(@ARGV)>=2) {
 								'qtl_data' => $bulkData,
 							);
 							
-							$bes->index({ 'source' => \%entry });
+							$bes->index({ 'source' => \%entry })  unless($doSimul);
 						}
 						$bulkGeneId = $vals[0];
 						$bulkData = '';
@@ -425,7 +431,7 @@ if(scalar(@ARGV)>=2) {
 						}
 					}
 					
-					$bes->index({ 'source' => \%entry });
+					$bes->index({ 'source' => \%entry })  unless($doSimul);
 				}
 				#use Data::Dumper;
 				#print Dumper(\%entry),"\n";
@@ -439,7 +445,7 @@ if(scalar(@ARGV)>=2) {
 					'qtl_data' => $bulkData,
 				);
 				
-				$bes->index({ 'source' => \%entry });
+				$bes->index({ 'source' => \%entry })  unless($doSimul);
 			}
 			
 			$bes->flush();
@@ -450,5 +456,5 @@ if(scalar(@ARGV)>=2) {
 		}
 	}
 } else {
-	print STDERR "Usage: $0 [-C] {ini file} {tab file}+\n";
+	print STDERR "Usage: $0 [-C] [-s] {ini file} {tab file}+\n";
 }
