@@ -402,7 +402,7 @@ if(scalar(@ARGV)>=2) {
 						} elsif($qtl_source eq 'gene') {
 							$entry{'ensemblGeneId'} = $data{$geneIdKey};
 						} elsif($qtl_source eq 'exon') {
-							my $lastdot = rindex('.', $data{$geneIdKey});
+							my $lastdot = rindex($data{$geneIdKey},'.');
 							$entry{'ensemblGeneId'} = substr($data{$geneIdKey},0,$lastdot);
 							$entry{'exonNumber'} = substr($data{$geneIdKey},$lastdot+1) + 0;
 						} elsif($qtl_source eq 'meth') {
