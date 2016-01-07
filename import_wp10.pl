@@ -178,7 +178,7 @@ my @DEFAULTS = (
 	['path_prefix' => '' ],
 	['user' => '' ],
 	['pass' => '' ],
-	['request_timeout' => 300],
+	['request_timeout' => 3600],
 );
 
 my %skipCol = (
