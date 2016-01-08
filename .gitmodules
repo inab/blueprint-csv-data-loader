@@ -1,0 +1,4 @@
+[submodule "BLUEPRINT-dcc-loading-scripts"]
+	path = BLUEPRINT-dcc-loading-scripts
+	url = https://github.com/inab/BLUEPRINT-dcc-loading-scripts.git
+	branch = wp10
