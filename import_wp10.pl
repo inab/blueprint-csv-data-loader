@@ -413,7 +413,7 @@ if(scalar(@ARGV)>=2) {
 							$entry{'splice'} = $data{$geneIdKey};
 						} else {
 							# Histones
-							$entry{'histone'} = 'H3'.$data{$geneIdKey};
+							$entry{'histone'} = 'H3'.$qtl_source;
 						}
 						
 					} elsif($fileType eq SQTL_FILETYPE) {
