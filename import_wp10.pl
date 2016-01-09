@@ -1,12 +1,33 @@
 #!/usr/bin/perl -w
 
+use v5.12;
+use warnings qw(all);
 use strict;
+
+use FindBin;
+use lib $FindBin::Bin."/BLUEPRINT-dcc-loading-scripts/model/schema+tools/lib";
+use lib $FindBin::Bin."/BLUEPRINT-dcc-loading-scripts/libs";
 
 use boolean 0.32;
 use Carp;
 use Config::IniFiles;
 use File::Basename qw();
+use File::Spec;
+use Log::Log4perl;
 use Search::Elasticsearch 1.12;
+
+use BP::Model;
+use BP::Loader::Mapper;
+
+use BP::DCCLoader::Parsers;
+use BP::DCCLoader::WorkingDir;
+use BP::DCCLoader::Parsers::GencodeGTFParser;
+
+my $LOG;
+BEGIN {
+	Log::Log4perl->easy_init( { level => $Log::Log4perl::INFO, layout => "[%d{ISO8601}]%p %m%n" } );
+	$LOG = Log::Log4perl->get_logger(__PACKAGE__);
+};
 
 use constant INI_SECTION	=>	'elasticsearch';
 
@@ -16,7 +37,7 @@ use constant DEFAULT_WP10_TYPE	=>	'qtl';
 use constant BULK_WP10_TYPE	=>	'bulkqtl';
 
 use constant DATA_FILETYPE	=>	'data';
-use constant SQTL_FILETYPE	=>	'sqtl';
+use constant SQTLSEEKER_FILETYPE	=>	'sqtlseeker';
 use constant BULK_FILETYPE	=>	'bulk';
 
 my %QTL_TYPES = (
@@ -197,9 +218,11 @@ if(scalar(@ARGV) > 0 && $ARGV[0] eq '-s') {
 	shift(@ARGV);
 }
 
-if(scalar(@ARGV)>=2) {
+if(scalar(@ARGV)>=3) {
 	# First, let's read the configuration
 	my $iniFile = shift(@ARGV);
+	# Defined outside
+	my $cachingDir = shift(@ARGV);
 	
 	my $ini = Config::IniFiles->new(-file => $iniFile, -default => 'main');
 	
@@ -249,7 +272,33 @@ if(scalar(@ARGV)>=2) {
 		}
 	}
 	
-	# The connection
+	# Zeroth, load the data model
+	
+	# Let's parse the model
+	my $modelFile = $ini->val($BP::Loader::Mapper::SECTION,'model');
+	# Setting up the right path on relative cases
+	$modelFile = File::Spec->catfile(File::Basename::dirname($iniFile),$modelFile)  unless(File::Spec->file_name_is_absolute($modelFile));
+
+	$LOG->info("Parsing model $modelFile...");
+	my $model = undef;
+	eval {
+		$model = BP::Model->new($modelFile);
+	};
+	
+	if($@) {
+		Carp::croak('ERROR: Model parsing and validation failed. Reason: '.$@);
+	}
+	$LOG->info("\tDONE!");
+	
+	# First, explicitly create the caching directory
+	my $workingDir = BP::DCCLoader::WorkingDir->new($cachingDir);
+	
+	# Defined outside
+	my($p_Gencode,$p_PAR,$p_GThash) = BP::DCCLoader::Parsers::GencodeGTFParser::getGencodeCoordinates($model,$workingDir,$ini);
+	# Collapsing Gencode unique genes and transcripts into Ensembl's hash
+	@{$p_GThash}{keys(%{$p_PAR})} = values(%{$p_PAR});
+	
+	# The elasticsearch database connection
 	my $es = Search::Elasticsearch->new(@connParams,'nodes' => $confValues{nodes});
 	# Setting up the parameters to the JSON serializer
 	$es->transport->serializer->JSON->convert_blessed;
@@ -305,15 +354,15 @@ if(scalar(@ARGV)>=2) {
 			$cell_type = $1;
 			$qtl_source = $2;
 			$colSep = qr/\t/;
-			$fileType = SQTL_FILETYPE;
+			$fileType = SQTLSEEKER_FILETYPE;
 			$geneIdKey = 'geneId';
 			$snpIdKey = 'snpId';
 		} else {
-			print "[INFO] Discarding file $file (unknown type)\n";
+			$LOG->info("Discarding file $file (unknown type)");
 			next;
 		}
 		
-		print "[INFO] Processing $file (cell type $cell_type, type $fileType, source $qtl_source)\n";
+		$LOG->info("Processing $file (cell type $cell_type, type $fileType, source $qtl_source)");
 		if(open(my $CSV,'<:encoding(UTF-8)',$file)) {
 			
 			my @bes_params = (
@@ -416,12 +465,23 @@ if(scalar(@ARGV)>=2) {
 							$entry{'histone'} = 'H3'.$qtl_source;
 						}
 						
-					} elsif($fileType eq SQTL_FILETYPE) {
+					} elsif($fileType eq SQTLSEEKER_FILETYPE) {
 						$entry{'pv'} = $data{'pv'}+0E0;
 						$entry{'qv'} = $data{'qv'}+0E0;
 						$entry{'F'} = $data{'F'}+0E0;
-						$entry{'ensemblGeneId'} = $data{$geneIdKey};
+						my $ensemblGeneId = $data{$geneIdKey};
+						$entry{'ensemblGeneId'} = $ensemblGeneId;
 						$entry{'ensemblTranscriptId'} = [ $data{'tr.first'}, $data{'tr.second'} ];
+						
+						# Fetching the gene coordinates
+						if(exists($p_GThash->{$ensemblGeneId})) {
+							my $p_data = $p_GThash->{$ensemblGeneId};
+							my $p_coordinates = $p_data->{'coordinates'}[0];
+							$entry{'gene_chrom'} = $p_coordinates->{'chromosome'};
+							$entry{'gene_start'} = $p_coordinates->{'chromosome_start'};
+							$entry{'gene_end'} = $p_coordinates->{'chromosome_end'};
+						}
+						
 						my %metrics = ();
 						$entry{'metrics'} = \%metrics;
 						foreach my $key ('nb.groups', 'md', 'F.svQTL', 'nb.perms', 'nb.perms.svQTL', 'pv.svQTL', 'qv.svQTL') {
@@ -456,5 +516,5 @@ if(scalar(@ARGV)>=2) {
 		}
 	}
 } else {
-	print STDERR "Usage: $0 [-C] [-s] {ini file} {tab file}+\n";
+	print STDERR "Usage: $0 [-C] [-s] {ini file} {caching dir} {tab file}+\n";
 }
