@@ -216,6 +216,23 @@ my %skipCol = (
 	'chromosome_name'	=>	undef,
 );
 
+sub getMainSymbol($) {
+	my($p_data) = @_;
+	unless(exists($p_data->{'main_symbol'})) {
+		my $main_symbol;
+		foreach my $symbol (@{$p_data->{'symbol'}}) {
+			next  if(substr($symbol,0,3) eq 'ENS' || $symbol =~ /^\d+$/);
+			$main_symbol = $symbol;
+			last;
+		}
+		$main_symbol = $p_data->{'symbol'}[0]  unless(defined($main_symbol));
+		$p_data->{'main_symbol'} = $main_symbol;
+	}
+
+	return $p_data->{'main_symbol'};
+}
+
+
 my $doClean = undef;
 if(scalar(@ARGV) > 0 && $ARGV[0] eq '-C') {
 	$doClean = 1;
@@ -485,21 +502,43 @@ if(scalar(@ARGV)>=3) {
 						$entry{'ensemblGeneId'} = $ensemblGeneId;
 						$entry{'ensemblTranscriptId'} = [ $data{'tr.first'}, $data{'tr.second'} ];
 						
-						# Fetching the gene coordinates
-						if(exists($p_GThash->{$ensemblGeneId})) {
-							my $p_data = $p_GThash->{$ensemblGeneId};
-							my $p_coordinates = $p_data->{'coordinates'}[0];
-							$entry{'gene_chrom'} = $p_coordinates->{'chromosome'};
-							$entry{'gene_start'} = $p_coordinates->{'chromosome_start'};
-							$entry{'gene_end'} = $p_coordinates->{'chromosome_end'};
-						}
-						
 						my %metrics = ();
 						$entry{'metrics'} = \%metrics;
 						foreach my $key ('nb.groups', 'md', 'F.svQTL', 'nb.perms', 'nb.perms.svQTL', 'pv.svQTL', 'qv.svQTL') {
 							my $tKey = $key;
 							$tKey =~ tr/./_/;
 							$metrics{$tKey} = $data{$key} + 0E0;
+						}
+					}
+					
+					# Now, let's complement this
+					if(exists($entry{'ensemblTranscriptId'}) && !exists($entry{'ensemblGeneId'})) {
+						my $ensemblTranscriptId = $entry{'ensemblTranscriptId'};
+						# Fetching the gene coordinates
+						$ensemblTranscriptId = substr($ensemblTranscriptId,0,rindex($ensemblTranscriptId,'.'));
+						if(exists($p_GThash->{$ensemblTranscriptId})) {
+							my $p_data = $p_GThash->{$ensemblTranscriptId};
+							$entry{'ensemblGeneId'} = $p_data->{'feature_cluster_id'};
+						}
+					}
+
+					if(exists($entry{'ensemblGeneId'})) {
+						my $ensemblGeneId = $entry{'ensemblGeneId'};
+						# Fetching the gene coordinates
+						$ensemblGeneId = substr($ensemblGeneId,0,rindex($ensemblGeneId,'.'));
+						
+						if(exists($p_GThash->{$ensemblGeneId})) {
+							my $p_data = $p_GThash->{$ensemblGeneId};
+							unless(exists($entry{'gene_chrom'})) {
+								my $p_coordinates = $p_data->{'coordinates'}[0];
+								$entry{'gene_chrom'} = $p_coordinates->{'chromosome'};
+								$entry{'gene_start'} = $p_coordinates->{'chromosome_start'};
+								$entry{'gene_end'} = $p_coordinates->{'chromosome_end'};
+							}
+							
+							$entry{'gene_name'} = getMainSymbol($p_data);
+						} else {
+							print STDERR "$qtl_source ENSID NOT FOUND $ensemblGeneId\n";
 						}
 					}
 					
