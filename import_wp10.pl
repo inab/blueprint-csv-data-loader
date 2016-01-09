@@ -214,7 +214,7 @@ if(scalar(@ARGV) > 0 && $ARGV[0] eq '-C') {
 
 my $doSimul = undef;
 if(scalar(@ARGV) > 0 && $ARGV[0] eq '-s') {
-	$doClean = 1;
+	$doSimul = 1;
 	shift(@ARGV);
 }
 
