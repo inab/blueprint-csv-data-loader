@@ -398,7 +398,7 @@ if(scalar(@ARGV)>=3) {
 				index   => $indexName,
 				type    => $mappingName,
 			);
-			push(@bes_params,'max_count' => $ini->val('mapper','batch-size'))  if($ini->exists('mapper','batch-size'));
+			push(@bes_params,'max_count' => $ini->val($BP::Loader::Mapper::SECTION,$BP::Loader::Mapper::BATCH_SIZE_KEY))  if($ini->exists($BP::Loader::Mapper::SECTION,$BP::Loader::Mapper::BATCH_SIZE_KEY));
 			
 			# The bulk helper (for massive insertions)
 			my $bes = $es->bulk_helper(@bes_params);
