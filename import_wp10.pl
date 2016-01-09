@@ -32,6 +32,7 @@ BEGIN {
 use constant INI_SECTION	=>	'elasticsearch';
 
 use constant DEFAULT_WP10_INDEX	=>	'wp10qtls';
+use constant BULK_WP10_INDEX	=>	'wp10bulkqtls';
 
 use constant DEFAULT_WP10_TYPE	=>	'qtl';
 use constant BULK_WP10_TYPE	=>	'bulkqtl';
@@ -64,6 +65,10 @@ my %QTL_TYPES = (
 				'dynamic'	=>	boolean::false,
 				'type'	=>	'string',
 				'index' => 'not_analyzed',
+			},
+			'gene_name'	=> {
+				'dynamic'	=>	boolean::false,
+				'type'	=>	'string',
 			},
 			# 'rs', 'snpId'
 			'snp_id'	=> {
@@ -192,6 +197,11 @@ my %QTL_TYPES = (
 	},
 );
 
+my %QTL_INDEXES = (
+	+DEFAULT_WP10_TYPE => DEFAULT_WP10_INDEX,
+	+BULK_WP10_TYPE => BULK_WP10_INDEX,
+);
+
 my @DEFAULTS = (
 	['use_https' => 'false' ],
 	['nodes' => [ 'localhost' ] ],
@@ -303,20 +313,21 @@ if(scalar(@ARGV)>=3) {
 	# Setting up the parameters to the JSON serializer
 	$es->transport->serializer->JSON->convert_blessed;
 	
-	my $indexName = DEFAULT_WP10_INDEX;
-
-	$es->indices->delete('index' => $indexName)  if($doClean && $es->indices->exists('index' => $indexName));
-	unless($es->indices->exists('index' => $indexName)) {
-		$es->indices->create('index' => $indexName);
-		foreach my $mappingName (keys(%QTL_TYPES)) {
-			$es->indices->put_mapping(
-				'index' => $indexName,
-				'type' => $mappingName,
-				'body' => {
-					$mappingName => $QTL_TYPES{$mappingName}
-				}
-			);
+	if($doClean) {
+		foreach my $indexName (values(%QTL_INDEXES)) {
+			$es->indices->delete('index' => $indexName)  if($es->indices->exists('index' => $indexName));
 		}
+	}
+	foreach my $mappingName (keys(%QTL_TYPES)) {
+		my $indexName = $QTL_INDEXES{$mappingName};
+		$es->indices->create('index' => $indexName)  unless($es->indices->exists('index' => $indexName));
+		$es->indices->put_mapping(
+			'index' => $indexName,
+			'type' => $mappingName,
+			'body' => {
+				$mappingName => $QTL_TYPES{$mappingName}
+			}
+		);
 	}
 	
 	foreach my $file (@ARGV) {
@@ -361,6 +372,7 @@ if(scalar(@ARGV)>=3) {
 			$LOG->info("Discarding file $file (unknown type)");
 			next;
 		}
+		my $indexName = $QTL_INDEXES{$mappingName};
 		
 		$LOG->info("Processing $file (cell type $cell_type, type $fileType, source $qtl_source)");
 		if(open(my $CSV,'<:encoding(UTF-8)',$file)) {
