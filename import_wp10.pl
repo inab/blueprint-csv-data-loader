@@ -42,7 +42,7 @@ use constant SQTLSEEKER_FILETYPE	=>	'sqtlseeker';
 use constant BULK_FILETYPE	=>	'bulk';
 
 my %QTL_TYPES = (
-	+DEFAULT_WP10_TYPE => {
+	DEFAULT_WP10_TYPE() => {
 		'_all'	=> {
 			'enabled'	=>	boolean::true
 		},
@@ -163,7 +163,7 @@ my %QTL_TYPES = (
 			},
 		}
 	},
-	+BULK_WP10_TYPE => {
+	BULK_WP10_TYPE() => {
 		'_all'	=> {
 			'enabled'	=>	boolean::true
 		},
@@ -198,8 +198,8 @@ my %QTL_TYPES = (
 );
 
 my %QTL_INDEXES = (
-	+DEFAULT_WP10_TYPE => DEFAULT_WP10_INDEX,
-	+BULK_WP10_TYPE => BULK_WP10_INDEX,
+	DEFAULT_WP10_TYPE() => DEFAULT_WP10_INDEX,
+	BULK_WP10_TYPE() => BULK_WP10_INDEX,
 );
 
 my @DEFAULTS = (
@@ -398,7 +398,7 @@ if(scalar(@ARGV)>=3) {
 				index   => $indexName,
 				type    => $mappingName,
 			);
-			push(@bes_params,'max_count' => $ini->val($BP::Loader::Mapper::SECTION,$BP::Loader::Mapper::BATCH_SIZE_KEY))  if($ini->exists($BP::Loader::Mapper::SECTION,$BP::Loader::Mapper::BATCH_SIZE_KEY));
+			push(@bes_params,'max_count' => $ini->val($BP::Loader::Mapper::SECTION,BP::Loader::Mapper::BATCH_SIZE_KEY))  if($ini->exists($BP::Loader::Mapper::SECTION,BP::Loader::Mapper::BATCH_SIZE_KEY));
 			
 			# The bulk helper (for massive insertions)
 			my $bes = $es->bulk_helper(@bes_params);
