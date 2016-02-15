@@ -16,6 +16,8 @@ use File::Spec;
 use Log::Log4perl;
 use Search::Elasticsearch 1.12;
 
+use Set::IntervalTree;
+
 use BP::Model;
 use BP::Loader::Mapper;
 
@@ -325,26 +327,48 @@ if(scalar(@ARGV)>=3) {
 	# Collapsing Gencode unique genes and transcripts into Ensembl's hash
 	@{$p_GThash}{keys(%{$p_PAR})} = values(%{$p_PAR});
 	
+	# Now, we are going to have a forest, where each interval tree is a chromosome
+	$LOG->info("Generating interval forest");
+	my %trees = ();
+	foreach my $node (values(%{$p_GThash})) {
+		if($node->{feature} eq 'gene') {
+			my $p_coord = $node->{coordinates}[0];
+			my $tree;
+			if(exists($trees{$p_coord->{chromosome}})) {
+				$tree = $trees{$p_coord->{chromosome}};
+			} else {
+				$tree = Set::IntervalTree->new();
+				$trees{$p_coord->{chromosome}} = $tree;
+			}
+			
+			# As ranges are half-open, take it into account
+			$tree->insert($node,$p_coord->{chromosome_start},$p_coord->{chromosome_end}+1);
+		}
+	}
+	$LOG->info("Interval forest ready!");
+	
 	# The elasticsearch database connection
 	my $es = Search::Elasticsearch->new(@connParams,'nodes' => $confValues{nodes});
 	# Setting up the parameters to the JSON serializer
 	$es->transport->serializer->JSON->convert_blessed;
 	
-	if($doClean) {
-		foreach my $indexName (values(%QTL_INDEXES)) {
-			$es->indices->delete('index' => $indexName)  if($es->indices->exists('index' => $indexName));
-		}
-	}
-	foreach my $mappingName (keys(%QTL_TYPES)) {
-		my $indexName = $QTL_INDEXES{$mappingName};
-		$es->indices->create('index' => $indexName)  unless($es->indices->exists('index' => $indexName));
-		$es->indices->put_mapping(
-			'index' => $indexName,
-			'type' => $mappingName,
-			'body' => {
-				$mappingName => $QTL_TYPES{$mappingName}
+	unless($doSimul) {
+		if($doClean) {
+			foreach my $indexName (values(%QTL_INDEXES)) {
+				$es->indices->delete('index' => $indexName)  if($es->indices->exists('index' => $indexName));
 			}
-		);
+		}
+		foreach my $mappingName (keys(%QTL_TYPES)) {
+			my $indexName = $QTL_INDEXES{$mappingName};
+			$es->indices->create('index' => $indexName)  unless($es->indices->exists('index' => $indexName));
+			$es->indices->put_mapping(
+				'index' => $indexName,
+				'type' => $mappingName,
+				'body' => {
+					$mappingName => $QTL_TYPES{$mappingName}
+				}
+			);
+		}
 	}
 	
 	foreach my $file (@ARGV) {
@@ -540,6 +564,32 @@ if(scalar(@ARGV)>=3) {
 						} else {
 							print STDERR "$qtl_source ENSID NOT FOUND $ensemblGeneId\n";
 						}
+					} elsif(exists($trees{$entry{'gene_chrom'}})) {
+						my $tree = $trees{$entry{'gene_chrom'}};
+						
+						# Fetching the genes overlapping these coordinates
+						my @geneNames = ();
+						my @ensemblGeneIds = ();
+						
+						my $p_p_data = $tree->fetch($entry{'gene_start'},$entry{'gene_end'}+1);
+						foreach my $p_data (@{$p_p_data}) {
+							my $p_coordinates = $p_data->{'coordinates'}[0];
+							
+							push(@ensemblGeneIds,$p_coordinates->{'feature_id'});
+							push(@geneNames,getMainSymbol($p_data));
+						}
+						
+						if(scalar(@ensemblGeneIds)>0) {
+							if(scalar(@ensemblGeneIds)>1) {
+								$entry{'ensemblGeneId'} = \@ensemblGeneIds;
+								$entry{'gene_name'} = \@geneNames;
+							} else {
+								$entry{'ensemblGeneId'} = $ensemblGeneIds[0];
+								$entry{'gene_name'} = $geneNames[0];
+							}
+						}
+					} else {
+						$LOG->info("Mira cell_type => $cell_type, qtl_source => $qtl_source, gene_id => $entry{gene_id}");
 					}
 					
 					$bes->index({ 'source' => \%entry })  unless($doSimul);
@@ -559,7 +609,7 @@ if(scalar(@ARGV)>=3) {
 				$bes->index({ 'source' => \%entry })  unless($doSimul);
 			}
 			
-			$bes->flush();
+			$bes->flush()  unless($doSimul);
 			
 			close($CSV);
 		} else {
