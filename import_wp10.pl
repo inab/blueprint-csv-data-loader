@@ -35,13 +35,16 @@ use constant INI_SECTION	=>	'elasticsearch';
 
 use constant DEFAULT_WP10_INDEX	=>	'wp10qtls';
 use constant BULK_WP10_INDEX	=>	'wp10bulkqtls';
+use constant VARIABILITY_WP10_INDEX	=>	'wp10qtls_variability';
 
 use constant DEFAULT_WP10_TYPE	=>	'qtl';
 use constant BULK_WP10_TYPE	=>	'bulkqtl';
+use constant VARIABILITY_WP10_TYPE	=>	'qtl_variability';
 
 use constant DATA_FILETYPE	=>	'data';
 use constant SQTLSEEKER_FILETYPE	=>	'sqtlseeker';
 use constant BULK_FILETYPE	=>	'bulk';
+use constant VARIABILITY_FILETYPE	=>	'variability';
 
 my %QTL_TYPES = (
 	DEFAULT_WP10_TYPE() => {
@@ -197,11 +200,129 @@ my %QTL_TYPES = (
 			},
 		}
 	},
+	VARIABILITY_WP10_TYPE() => {
+		'_all'	=> {
+			'enabled'	=>	boolean::true
+		},
+		'properties' => {
+			# This is 'mono', 'neut', 'tcel' or an array of 'mono', 'neut', 'tcel'
+			'cell_type' => {
+				'dynamic'	=>	boolean::false,
+				'type'	=>	'string',
+				'index' => 'not_analyzed',
+			},
+			# This is 'gene', 'meth'
+			'qtl_source' => {
+				'dynamic'	=>	boolean::false,
+				'type'	=>	'string',
+				'index' => 'not_analyzed',
+			},
+			# Common columns
+			# 'geneID' is really the QTL id
+			'gene_id'	=> {
+				'dynamic'	=>	boolean::false,
+				'type'	=>	'string',
+				'index' => 'not_analyzed',
+			},
+			'gene_name'	=> {	# HGNC symbol
+				'dynamic'	=>	boolean::false,
+				'type'	=>	'string',
+			},
+			'gene_chrom'	=> {	# Chr
+				'dynamic'	=>	boolean::false,
+				'type'	=>	'string',
+				'index' => 'not_analyzed',
+			},
+			'pos'	=> {	# Location
+				'dynamic'	=>	boolean::false,
+				'type'	=>	'long',
+			},
+			'arm'	=> {	# Arm
+				'dynamic'	=>	boolean::false,
+				'type'	=>	'string',
+				'index' => 'not_analyzed',
+			},
+			'ensemblGeneId'	=> {	# Ensembl ID
+				'dynamic'	=>	boolean::false,
+				'type'	=>	'string',
+				'index' => 'not_analyzed',
+			},
+			'feature'	=> {	# Feature
+				'dynamic'	=>	boolean::false,
+				'type'	=>	'string',
+				'index' => 'not_analyzed',
+			},
+			'chromatin_state' => {	# Chromatin state *
+				'dynamic'	=>	boolean::false,
+				'type'	=>	'nested',
+				'include_in_parent'	=>	boolean::true,
+				'properties'	=> {
+					'cell_type' => {	# This is 'mono', 'neut' or 'tcel'
+						'dynamic'	=>	boolean::false,
+						'type'	=>	'string',
+						'index' => 'not_analyzed',
+					},
+					'state' => {
+						'dynamic'	=>	boolean::false,
+						'type'	=>	'string',
+						'index' => 'not_analyzed',
+					}
+				}
+			},
+			'go_term'	=> {	# Feature
+				'dynamic'	=>	boolean::false,
+				'type'	=>	'string',
+			},
+			# The different ones for 'meth'
+			# Genotype	Age	Sex	BMI	Alcohol	Monocyte count	Monocyte percentage	Analysis day
+			# Genotype	Age	Sex	BMI	Alcohol	Neutrophil count	Neutrophil percentage	Neutrophil granularity	Neutrophil cellular content	Analysis day
+			# Genotype	Age	Sex	BMI	Alcohol	Lymphocyte count	Lymphocyte percentage	Analysis day
+			# The different ones for 'gene'
+			# Genotype	Age	Sex	BMI	Alcohol	Monocyte count	Monocyte percentage	Analysis day
+			# Genotype	Age	Sex	BMI	Alcohol	Neutrophil count	Neutrophil percentage	Neutrophil granularity	Neutrophil cellular count	Analysis day
+			# Genotype	Age	Sex	BMI	Alcohol	Lymphocyte count	Lymphocyte percentage	Analysis day
+			'variability'	=> {	# Feature
+				'dynamic'	=>	boolean::false,
+				'type'	=>	'string',
+				'index' => 'not_analyzed',
+			},
+		}
+	},
+);
+
+my @variability_keys = (
+	'Genotype',
+	'Age',
+	'Sex',
+	'BMI',
+	'Alcohol',
+	'Monocyte count',
+	'Monocyte percentage',
+	'Neutrophil count',
+	'Neutrophil percentage',
+	'Neutrophil granularity',
+	'Neutrophil cellular content',
+	'Lymphocyte count',
+	'Lymphocyte percentage',
+	'Analysis day'
+);
+
+my %chromatin_keys = (
+	'Chromatin state monocytes' => {
+		'cell_type'	=> 'mono'
+	},
+	'Chromatin state neutrophils' => {
+		'cell_type'	=> 'neut'
+	},
+	'Chromatin state T cells' => {
+		'cell_type'	=> 'tcel'
+	}
 );
 
 my %QTL_INDEXES = (
 	DEFAULT_WP10_TYPE() => DEFAULT_WP10_INDEX,
 	BULK_WP10_TYPE() => BULK_WP10_INDEX,
+	VARIABILITY_WP10_TYPE() => VARIABILITY_WP10_INDEX,
 );
 
 my @DEFAULTS = (
@@ -380,6 +501,7 @@ if(scalar(@ARGV)>=3) {
 		my $colSep;
 		my $fileType;
 		my $cell_type;
+		my @cell_types = ();
 		my $qtl_source;
 		my $geneIdKey;
 		my $snpIdKey;
@@ -409,6 +531,14 @@ if(scalar(@ARGV)>=3) {
 			$fileType = SQTLSEEKER_FILETYPE;
 			$geneIdKey = 'geneId';
 			$snpIdKey = 'snpId';
+		} elsif($basename =~ /^([^_]+)_([^_]+)_hypervar_S[13]\.txt\.csv$/) {
+			$mappingName = VARIABILITY_WP10_TYPE;
+			$cell_type = $1;
+			@cell_types = split(/\+/,$cell_type);
+			$qtl_source = $2;
+			$colSep = qr/\t/;
+			$fileType = VARIABILITY_FILETYPE;
+			$geneIdKey = $qtl_source eq 'meth' ? 'Probe ID' : 'Ensembl ID';
 		} else {
 			$LOG->info("Discarding file $file (unknown type)");
 			next;
@@ -475,6 +605,57 @@ if(scalar(@ARGV)>=3) {
 						$bulkData = '';
 					}
 					$bulkData .= join('\t',@vals[1..$#vals]) . "\n";
+				} elsif($fileType eq VARIABILITY_FILETYPE) {
+					my %data = ();
+					@data{@cols} = @vals;
+					
+					my %entry = (
+						'cell_type' => \@cell_types,
+						'qtl_source' => $qtl_source,
+						'gene_id' => $data{$geneIdKey},
+					);
+					
+					$entry{'gene_name'} = $data{'HGNC symbol'}  if(exists($data{'HGNC symbol'}));
+					$entry{'gene_chrom'} = $data{'Chr'}  if(exists($data{'Chr'}));
+					$entry{'pos'} = $data{'Location'}  if(exists($data{'Location'}));
+					$entry{'arm'} = $data{'Arm'}  if(exists($data{'Arm'}));
+					$entry{'ensemblGeneId'} = $data{'Ensembl ID'}  if(exists($data{'Ensembl ID'}));
+					$entry{'feature'} = $data{'Feature'}  if(exists($data{'Feature'}));
+					
+					if(exists($data{'Chromatin state'})) {
+						$entry{'chromatin_state'} = {
+							'cell_type' => $cell_type,
+							'state' => $data{'Chromatin state'}
+						};
+					} else {
+						my @chromatin_states = ();
+						my $someExisted = undef;
+						foreach my $chroKey (keys(%chromatin_keys)) {
+							if(exists($data{$chroKey})) {
+								$someExisted = 1;
+								push(@chromatin_states, {
+									'cell_type' => $chromatin_keys{$chroKey}{'cell_type'},
+									'state' => $data{$chroKey}
+								});
+							}
+						}
+						$entry{'chromatin_state'} = \@chromatin_states  if($someExisted);
+					}
+					
+					if(exists($data{'GO term'})) {
+						my @go = split(/ *, */,$data{'GO term'});
+						$entry{'go_term'} = \@go;
+					}
+					
+					my @variabilities = ();
+					foreach my $variability (@variability_keys) {
+						if(exists($data{$variability}) && $data{$variability} ne '0') {
+							push(@variabilities,$variability);
+						}
+					}
+					$entry{'variability'} = \@variabilities;
+					
+					$bes->index({ 'source' => \%entry })  unless($doSimul);
 				} else {
 					my %data = ();
 					@data{@cols} = @vals;
