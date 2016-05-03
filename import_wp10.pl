@@ -39,7 +39,8 @@ use constant INI_SECTION	=>	'elasticsearch';
 
 use constant {
 	DBSNP_BASE_TAG	=>	'dbsnp-ftp-base-uri',
-	DBSNP_VCF_TAG	=>	'dbsnp-vcf'
+	DBSNP_VCF_TAG	=>	'dbsnp-vcf',
+	DBSNP_MERGED_TABLE_TAG	=>	'dbsnp-merged-table'
 };
 
 use constant DEFAULT_WP10_INDEX	=>	'wp10qtls';
@@ -394,8 +395,8 @@ sub getMainSymbol($) {
 	return $p_data->{'main_symbol'};
 }
 
-sub rsIdRemapper($\@) {
-	my($localDbSnpVCFFile,$p_files) = @_;
+sub rsIdRemapper($$\@) {
+	my($localDbSnpVCFFile,$localDbSnpMergedTableFile,$p_files) = @_;
 	
 	# First pass, dbSNP rsId extraction for recognized files
 	my %rsIdMapping = ();
@@ -408,7 +409,7 @@ sub rsIdRemapper($\@) {
 	my $COORDFILE = File::Temp->new(TEMPLATE => 'WP10-coord-XXXXXX',SUFFIX => '.txt',TMPDIR => 1);
 	my $coordFilename = $COORDFILE->filename();
 	my $coordCount = 0;
-	if(open(my $SNPIDFH,'>',$rsidFilename) && open(my $COORDFH,'>',$coordFilename)) {
+	if(open(my $COORDFH,'>',$coordFilename)) {
 		foreach my $file (@{$p_files}) {
 			my $basename = File::Basename::basename($file);
 			
@@ -460,9 +461,11 @@ sub rsIdRemapper($\@) {
 					@data{@cols} = @vals;
 					
 					my $snp_id = $data{$snpIdKey};
-					if($snp_id =~ /^rs[0-9]+$/) {
-						print $SNPIDFH $snp_id,"\n";
-						$rsidCount++;
+					if($snp_id =~ /^rs([0-9]+)$/) {
+						if(!exists($rsIdMapping{$snp_id})) {
+							$rsidCount++;
+							$rsIdMapping{$snp_id} = undef;
+						}
 					} elsif($snp_id =~ /^snp([0-9]+)_chr(.+)$/) {
 						if(!exists($coordMapping{$2}) || !exists($coordMapping{$2}{$1})) {
 							$coordMapping{$2} = {}  unless(exists($coordMapping{$2}));
@@ -483,7 +486,6 @@ sub rsIdRemapper($\@) {
 				$LOG->logcroak("[ERROR] Unable to open $file. Reason: ".$!);
 			}
 		}
-		close($SNPIDFH);
 		
 		# Tabix wants its input query file ordered by coordinates
 		foreach my $chromosome (keys(%coordMapping)) {
@@ -494,11 +496,47 @@ sub rsIdRemapper($\@) {
 		}
 		close($COORDFH);
 	} else {
-		$LOG->logcroak("[ERROR] Unable to create either temp $rsidFilename or temp $coordFilename. Reason: ".$!);
+		$LOG->logcroak("[ERROR] Unable to create temp $coordFilename. Reason: ".$!);
 	}
 	
 	if($rsidCount > 0) {
 		$LOG->info("dbSNP coordinates and MAF mapping from rsId ($rsidCount) using vcftools");
+		# We need to get the merged rsIds
+		# grep did not work because the large pattern file ate lots of memory
+		# http://www.ncbi.nlm.nih.gov/books/NBK279185/#FTP.do_you_have_a_table_of_merged_snps_s
+		if(open(my $SNPIDFH,'>',$rsidFilename) && open(my $MERGED,'-|','gunzip','-c',$localDbSnpMergedTableFile)) {
+			# First add the merged ids
+			while(my $line=<$MERGED>) {
+				chomp($line);
+				my($orig,$merged,undef) = split(/\t/,$line,3);
+				my $rsId = 'rs'.$orig;
+				
+				if(exists($rsIdMapping{$rsId})) {
+					my $rsIdMerged = 'rs'.$merged;
+					
+					unless(defined($rsIdMapping{$rsIdMerged})) {
+						$rsIdMapping{$rsIdMerged} = {};
+						print $SNPIDFH $rsIdMerged,"\n";
+					}
+					$rsIdMapping{$rsId} = $rsIdMapping{$rsIdMerged};
+				}
+			}
+			
+			close($MERGED);
+			
+			# Now add those rsId which were not merged
+			foreach my $rsId (keys(%rsIdMapping)) {
+				unless(defined($rsIdMapping{$rsId})) {
+					$rsIdMapping{$rsId} = {};
+					print $SNPIDFH $rsId,"\n";
+				}
+			}
+			
+			close($SNPIDFH);
+		} else {
+			$LOG->logcroak("[ERROR] Unable to either create temp $rsidFilename or grepping for merged rsIds. Reason: ".$!);
+		}
+		
 		# This is needed due the unwanted behavior of vcftools, which always creates a log file
 		my $curdir = getcwd();
 		my $ND = File::Temp->newdir(TMPDIR => 1);
@@ -510,13 +548,13 @@ sub rsIdRemapper($\@) {
 				chomp($line);
 				
 				my($chromosome,$pos,$rsId,$REF,$ALT,undef,undef,$INFO) = split(/\t/,$line,-1);
-				my %data = (
-					'chromosome'	=> $chromosome,
-					'pos'	=> $pos+0,
-					'rsId'	=> [ $rsId ],
-					'dbSnpRef'	=> [ $REF ],
-					'dbSnpAlt'	=> [ $ALT ]
-				);
+				my $p_data = $rsIdMapping{$rsId};
+				
+				$p_data->{'chromosome'} = $chromosome;
+				$p_data->{'pos'} = $pos+0;
+				$p_data->{'rsId'} = [ $rsId ];
+				$p_data->{'dbSnpRef'} = [ $REF ];
+				$p_data->{'dbSnpAlt'} = [ $ALT ];
 				
 				my $MAF = 2.0;
 				if($INFO =~ /CAF=([^;]+)/) {
@@ -532,9 +570,8 @@ sub rsIdRemapper($\@) {
 				}
 				
 				# Assigning the minor allele frequency when the impossible value is not there
-				$data{'MAF'} = [ ($MAF < 2.0) ? $MAF : undef ];
+				$p_data->{'MAF'} = [ ($MAF < 2.0) ? $MAF : undef ];
 				
-				$rsIdMapping{$rsId} = \%data;
 				$mappedRsidCount++;
 			}
 			close($VCF);
@@ -1102,6 +1139,7 @@ if(scalar(@ARGV)>=3) {
 	my $dbsnp_ftp_base = undef;
 	my $dbsnp_vcf_file = undef;
 	my $dbsnp_vcf_tbi_file = undef;
+	my $dbsnp_merged_table_uri = undef;
 	if($ini->exists(BP::DCCLoader::Parsers::DCC_LOADER_SECTION,DBSNP_BASE_TAG)) {
 		$dbsnp_ftp_base = $ini->val(BP::DCCLoader::Parsers::DCC_LOADER_SECTION,DBSNP_BASE_TAG);
 	} else {
@@ -1111,6 +1149,11 @@ if(scalar(@ARGV)>=3) {
 		$dbsnp_vcf_file = $ini->val(BP::DCCLoader::Parsers::DCC_LOADER_SECTION,DBSNP_VCF_TAG);
 	} else {
 		$LOG->logcroak("Configuration file $iniFile must have '".DBSNP_VCF_TAG."'");
+	}
+	if($ini->exists(BP::DCCLoader::Parsers::DCC_LOADER_SECTION,DBSNP_MERGED_TABLE_TAG)) {
+		$dbsnp_merged_table_uri = $ini->val(BP::DCCLoader::Parsers::DCC_LOADER_SECTION,DBSNP_MERGED_TABLE_TAG);
+	} else {
+		$LOG->logcroak("Configuration file $iniFile must have '".DBSNP_MERGED_TABLE_TAG."'");
 	}
 	
 	
@@ -1166,7 +1209,7 @@ if(scalar(@ARGV)>=3) {
 	
 	# Now, let's patch the properies of the different remote resources, using the properties inside the model
 	eval {
-		$model->annotations->applyAnnotations(\($dbsnp_ftp_base,$dbsnp_vcf_file));
+		$model->annotations->applyAnnotations(\($dbsnp_ftp_base,$dbsnp_vcf_file,$dbsnp_merged_table_uri));
 		$dbsnp_vcf_tbi_file = $dbsnp_vcf_file . '.tbi';
 	};
 	
@@ -1175,10 +1218,13 @@ if(scalar(@ARGV)>=3) {
 	
 	# And translate dbSNP uri to URI objects
 	$dbsnp_ftp_base = URI->new($dbsnp_ftp_base);
+	$dbsnp_merged_table_uri = URI->new($dbsnp_merged_table_uri);
 	
 	# Fetching dbSNP file in compressed VCF format, as well as its index
 	my $localDbSnpVCFFile;
 	my $localDbSnpVCFtbiFile;
+	my $localDbSnpMergedTableFile;
+	
 	{
 		# Defined outside
 		my $ftpServer = undef;
@@ -1198,6 +1244,10 @@ if(scalar(@ARGV)>=3) {
 		
 		$localDbSnpVCFtbiFile = $workingDir->cachedGet($ftpServer,$dbSnpPath.'/'.$dbsnp_vcf_tbi_file);
 		$LOG->logcroak("FATAL ERROR: Unable to fetch file $dbsnp_vcf_tbi_file from $dbSnpPath (host $dbSnpHost)")  unless(defined($localDbSnpVCFtbiFile));
+		
+		my $dbSnpMergedTablePath = $dbsnp_merged_table_uri->path;
+		$localDbSnpMergedTableFile = $workingDir->cachedGet($ftpServer,$dbSnpMergedTablePath);
+		$LOG->logcroak("FATAL ERROR: Unable to fetch $dbSnpMergedTablePath (host $dbSnpHost)")  unless(defined($localDbSnpMergedTableFile));
 		
 		$ftpServer->disconnect()  if($ftpServer->can('disconnect'));
 		$ftpServer->quit()  if($ftpServer->can('quit'));
@@ -1230,7 +1280,7 @@ if(scalar(@ARGV)>=3) {
 	$LOG->info("Interval forest ready!");
 	
 	# First pass, dbSNP rsId extraction for recognized files
-	my($p_rsIdMapping,$p_coordMapping) = rsIdRemapper($localDbSnpVCFFile,@files);
+	my($p_rsIdMapping,$p_coordMapping) = rsIdRemapper($localDbSnpVCFFile,$localDbSnpMergedTableFile,@files);
 	
 	# Second pass, file insertion
 	bulkInsertion($ini,%{$p_GThash},%trees,%{$p_rsIdMapping},%{$p_coordMapping},%chartMapping,@files);
