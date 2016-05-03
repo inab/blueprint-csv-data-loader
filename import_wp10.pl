@@ -11,9 +11,13 @@ use lib $FindBin::Bin."/BLUEPRINT-dcc-loading-scripts/libs";
 use boolean 0.32;
 use Carp;
 use Config::IniFiles;
+use Cwd;
 use File::Basename qw();
 use File::Spec;
+use File::Temp qw();
 use Log::Log4perl;
+use MIME::Base64 qw();
+use Net::FTP::AutoReconnect;
 use Search::Elasticsearch 1.12;
 
 use Set::IntervalTree;
@@ -32,6 +36,11 @@ BEGIN {
 };
 
 use constant INI_SECTION	=>	'elasticsearch';
+
+use constant {
+	DBSNP_BASE_TAG	=>	'dbsnp-ftp-base-uri',
+	DBSNP_VCF_TAG	=>	'dbsnp-vcf'
+};
 
 use constant DEFAULT_WP10_INDEX	=>	'wp10qtls';
 use constant BULK_WP10_INDEX	=>	'wp10bulkqtls';
@@ -81,6 +90,21 @@ my %QTL_TYPES = (
 				'type'	=>	'string',
 				'index' => 'not_analyzed',
 			},
+			'rsId'	=> {
+				'dynamic'	=>	boolean::false,
+				'type'	=>	'string',
+				'index' => 'not_analyzed',
+			},
+			'dbSnpRef'	=> {
+				'dynamic'	=>	boolean::false,
+				'type'	=>	'string',
+				'index' => 'not_analyzed',
+			},
+			'dbSnpAlt'	=> {
+				'dynamic'	=>	boolean::false,
+				'type'	=>	'string',
+				'index' => 'not_analyzed',
+			},
 			'gene_chrom'	=> {
 				'dynamic'	=>	boolean::false,
 				'type'	=>	'string',
@@ -97,6 +121,10 @@ my %QTL_TYPES = (
 			'pos'	=> {
 				'dynamic'	=>	boolean::false,
 				'type'	=>	'long',
+			},
+			'MAF'	=> {
+				'dynamic'	=>	boolean::false,
+				'type'	=>	'double',
 			},
 			'pv'	=> {
 				'dynamic'	=>	boolean::false,
@@ -286,6 +314,10 @@ my %QTL_TYPES = (
 				'type'	=>	'string',
 				'index' => 'not_analyzed',
 			},
+			'associated_chart'	=> {
+				'dynamic'	=>	boolean::false,
+				'type'	=>	'binary',
+			},
 		}
 	},
 );
@@ -305,6 +337,7 @@ my @variability_keys = (
 	'Lymphocyte count',
 	'Lymphocyte percentage',
 	'Analysis day'
+#	'Alysis day'
 );
 
 my %chromatin_keys = (
@@ -339,6 +372,12 @@ my %skipCol = (
 	'chromosome_name'	=>	undef,
 );
 
+# Global variables
+my $doClean = undef;
+my $doSimul = undef;
+my $J = undef;
+
+
 sub getMainSymbol($) {
 	my($p_data) = @_;
 	unless(exists($p_data->{'main_symbol'})) {
@@ -355,26 +394,224 @@ sub getMainSymbol($) {
 	return $p_data->{'main_symbol'};
 }
 
-
-my $doClean = undef;
-if(scalar(@ARGV) > 0 && $ARGV[0] eq '-C') {
-	$doClean = 1;
-	shift(@ARGV);
-}
-
-my $doSimul = undef;
-if(scalar(@ARGV) > 0 && $ARGV[0] eq '-s') {
-	$doSimul = 1;
-	shift(@ARGV);
-}
-
-if(scalar(@ARGV)>=3) {
-	# First, let's read the configuration
-	my $iniFile = shift(@ARGV);
-	# Defined outside
-	my $cachingDir = shift(@ARGV);
+sub rsIdRemapper($\@) {
+	my($localDbSnpVCFFile,$p_files) = @_;
 	
-	my $ini = Config::IniFiles->new(-file => $iniFile, -default => 'main');
+	# First pass, dbSNP rsId extraction for recognized files
+	my %rsIdMapping = ();
+	my %coordMapping = ();
+	
+	$LOG->info("dbSNP rsId and coordinate extraction from recognized files");
+	my $RSIDFILE = File::Temp->new(TEMPLATE => 'WP10-rsid-XXXXXX',SUFFIX => '.txt',TMPDIR => 1);
+	my $rsidFilename = $RSIDFILE->filename();
+	my $rsidCount = 0;
+	my $COORDFILE = File::Temp->new(TEMPLATE => 'WP10-coord-XXXXXX',SUFFIX => '.txt',TMPDIR => 1);
+	my $coordFilename = $COORDFILE->filename();
+	my $coordCount = 0;
+	if(open(my $SNPIDFH,'>',$rsidFilename) && open(my $COORDFH,'>',$coordFilename)) {
+		foreach my $file (@{$p_files}) {
+			my $basename = File::Basename::basename($file);
+			
+			# Three different types of files
+			my $mappingName;
+			my $colsLine;
+			my $colSep;
+			my $fileType;
+			my $cell_type;
+			my @cell_types = ();
+			my $qtl_source;
+			my $geneIdKey;
+			my $snpIdKey;
+			
+			if($basename =~ /^([^_.]+)[_.]([^_]+)_(.+)_summary\.hdf5\.txt$/) {
+				$mappingName = DEFAULT_WP10_TYPE;
+				$cell_type = $1;
+				$qtl_source = $2;
+				$colSep = qr/\t/;
+				$fileType = DATA_FILETYPE;
+				$geneIdKey = 'geneID';
+				$snpIdKey = 'rs';
+			} elsif($basename =~ /^([^.]+)\.([^.]+)\.sig5\.tsv$/) {
+				$mappingName = DEFAULT_WP10_TYPE;
+				$cell_type = $1;
+				$qtl_source = $2;
+				$colSep = qr/\t/;
+				$fileType = SQTLSEEKER_FILETYPE;
+				$geneIdKey = 'geneId';
+				$snpIdKey = 'snpId';
+			} else {
+				$LOG->info("SKipping file $file");
+				next;
+			}
+			
+			$LOG->info("Extracting rsIds from $file (cell type $cell_type, type $fileType, source $qtl_source)");
+			if(open(my $CSV,'<:encoding(UTF-8)',$file)) {
+				unless(defined($colsLine)) {
+					$colsLine = <$CSV>;
+					chomp($colsLine);
+				}
+				my @cols = split($colSep,$colsLine,-1);
+				
+				while(my $line=<$CSV>) {
+					chomp($line);
+					my @vals = split($colSep,$line,-1);
+					
+					my %data = ();
+					@data{@cols} = @vals;
+					
+					my $snp_id = $data{$snpIdKey};
+					if($snp_id =~ /^rs[0-9]+$/) {
+						print $SNPIDFH $snp_id,"\n";
+						$rsidCount++;
+					} elsif($snp_id =~ /^snp([0-9]+)_chr(.+)$/) {
+						if(!exists($coordMapping{$2}) || !exists($coordMapping{$2}{$1})) {
+							$coordMapping{$2} = {}  unless(exists($coordMapping{$2}));
+							$coordMapping{$2}{$1} = undef;
+							$coordCount ++;
+						}
+					} elsif($snp_id =~ /^([^:]+):([0-9]+)$/) {
+						if(!exists($coordMapping{$1}) || !exists($coordMapping{$1}{$2})) {
+							$coordMapping{$1} = {}  unless(exists($coordMapping{$1}));
+							$coordMapping{$1}{$2} = undef;
+							$coordCount ++;
+						}
+					}
+				}
+				
+				close($CSV);
+			} else {
+				$LOG->logcroak("[ERROR] Unable to open $file. Reason: ".$!);
+			}
+		}
+		close($SNPIDFH);
+		
+		# Tabix wants its input query file ordered by coordinates
+		foreach my $chromosome (keys(%coordMapping)) {
+			my @coords = sort { $a <=> $b } keys(%{$coordMapping{$chromosome}});
+			foreach my $coord (@coords) {
+				print $COORDFH $chromosome,"\t",$coord,"\n";
+			}
+		}
+		close($COORDFH);
+	} else {
+		$LOG->logcroak("[ERROR] Unable to create either temp $rsidFilename or temp $coordFilename. Reason: ".$!);
+	}
+	
+	if($rsidCount > 0) {
+		$LOG->info("dbSNP coordinates and MAF mapping from rsId ($rsidCount) using vcftools");
+		# This is needed due the unwanted behavior of vcftools, which always creates a log file
+		my $curdir = getcwd();
+		my $ND = File::Temp->newdir(TMPDIR => 1);
+		chdir($ND->dirname);
+		my $mappedRsidCount = 0;
+		if(open(my $VCF,'-|','vcftools','--gzvcf',$localDbSnpVCFFile,'--snps',$rsidFilename,'--recode','--recode-INFO','CAF','--stdout')) {
+			while(my $line=<$VCF>) {
+				next  if(substr($line,0,1) eq '#');
+				chomp($line);
+				
+				my($chromosome,$pos,$rsId,$REF,$ALT,undef,undef,$INFO) = split(/\t/,$line,-1);
+				my %data = (
+					'chromosome'	=> $chromosome,
+					'pos'	=> $pos+0,
+					'rsId'	=> [ $rsId ],
+					'dbSnpRef'	=> [ $REF ],
+					'dbSnpAlt'	=> [ $ALT ]
+				);
+				
+				my $MAF = 2.0;
+				if($INFO =~ /CAF=([^;]+)/) {
+					my @alleleFreqs = split(/,/,$1,-1);
+					foreach my $alleleFreq (@alleleFreqs) {
+						next  if($alleleFreq eq '.');
+						
+						# Number normalization
+						$alleleFreq += 0e0;
+						
+						$MAF = $alleleFreq  if($MAF > $alleleFreq);
+					}
+				}
+				
+				# Assigning the minor allele frequency when the impossible value is not there
+				$data{'MAF'} = [ ($MAF < 2.0) ? $MAF : undef ];
+				
+				$rsIdMapping{$rsId} = \%data;
+				$mappedRsidCount++;
+			}
+			close($VCF);
+		} else {
+			$LOG->logcroak("[ERROR] Unable to run vcftools on $rsidFilename. Reason: ".$!);
+		}
+		$LOG->info("Mapped $mappedRsidCount different dbSNP rsId to coordinates\n");
+		# Going back to the original directory
+		chdir($curdir);
+	} else {
+		$LOG->info("Skipping dbSNP coordinates and MAF mapping from rsId");
+	}
+	
+	if($coordCount > 0) {
+		$LOG->info("dbSNP rsId and MAF mapping from coordinates ($coordCount) using tabix");
+		my $mappedCoordCount = 0;
+		if(open(my $TABIX,'-|','tabix','-p','vcf','-R',$coordFilename,$localDbSnpVCFFile)) {
+			while(my $line=<$TABIX>) {
+				next  if(substr($line,0,1) eq '#');
+				chomp($line);
+				
+				my($chromosome,$pos,$rsId,$REF,$ALT,undef,undef,$INFO) = split(/\t/,$line,-1);
+				
+				my $p_data;
+				if(defined($coordMapping{$chromosome}{$pos})) {
+					$p_data = $coordMapping{$chromosome}{$pos};
+				} else {
+					$p_data = {
+						'chromosome'	=> $chromosome,
+						'pos'	=> $pos+0,
+						'rsId'	=> [],
+						'dbSnpRef'	=> [],
+						'dbSnpAlt'	=> [],
+						'MAF'	=> []
+					};
+					
+					$coordMapping{$chromosome}{$pos} = $p_data;
+					$mappedCoordCount++;
+				}
+				
+				push(@{$p_data->{'rsId'}},$rsId);
+				push(@{$p_data->{'dbSnpRef'}},$REF);
+				push(@{$p_data->{'dbSnpAlt'}},$ALT);
+				
+				my $MAF = 2.0;
+				if($INFO =~ /CAF=([^;]+)/) {
+					my @alleleFreqs = split(/,/,$1,-1);
+					foreach my $alleleFreq (@alleleFreqs) {
+						next  if($alleleFreq eq '.');
+						
+						# Number normalization
+						$alleleFreq += 0e0;
+						
+						$MAF = $alleleFreq  if($MAF > $alleleFreq);
+					}
+				}
+				
+				# Assigning the minor allele frequency when the impossible value is not there
+				push(@{$p_data->{'MAF'}},($MAF < 2.0) ? $MAF : undef);
+			}
+			
+			close($TABIX);
+		} else {
+			$LOG->logcroak("[ERROR] Unable to run tabix on $coordFilename. Reason: ".$!);
+		}
+		$LOG->info("Mapped $mappedCoordCount different dbSNP coordinates to rsId\n");
+	} else {
+		$LOG->info("Skipping dbSNP rsId and MAF mapping from coordinates");
+	}
+	
+	return (\%rsIdMapping,\%coordMapping);
+}
+
+sub bulkInsertion($\%\%\%\%\%\@) {
+	my($ini,$p_GThash,$p_trees,$p_rsIdMapping,$p_coordMapping,$p_chartMapping,$p_files) = @_;
+	
+	# Database connection setup
 	
 	my %confValues = ();
 	if($ini->SectionExists(INI_SECTION)) {
@@ -388,7 +625,7 @@ if(scalar(@ARGV)>=3) {
 				my @values = $ini->val(INI_SECTION,$key);
 				$confValues{$key} = (scalar(@values)>1)?\@values:((scalar(@values)>0)?$values[0]:undef);
 			} else {
-				Carp::croak("ERROR: required parameter $key not found in section ".INI_SECTION);
+				$LOG->logcroak("ERROR: required parameter $key not found in section ".INI_SECTION);
 			}
 		}
 		
@@ -411,7 +648,7 @@ if(scalar(@ARGV)>=3) {
 			}
 		}
 	} else {
-		Carp::croak("ERROR: Unable to read section ".INI_SECTION);
+		$LOG->logcroak("ERROR: Unable to read section ".INI_SECTION);
 	}
 	
 	my @connParams = ();
@@ -422,77 +659,20 @@ if(scalar(@ARGV)>=3) {
 		}
 	}
 	
-	# Zeroth, load the data model
-	
-	# Let's parse the model
-	my $modelFile = $ini->val($BP::Loader::Mapper::SECTION,'model');
-	# Setting up the right path on relative cases
-	$modelFile = File::Spec->catfile(File::Basename::dirname($iniFile),$modelFile)  unless(File::Spec->file_name_is_absolute($modelFile));
-
-	$LOG->info("Parsing model $modelFile...");
-	my $model = undef;
-	eval {
-		$model = BP::Model->new($modelFile);
-	};
-	
-	if($@) {
-		Carp::croak('ERROR: Model parsing and validation failed. Reason: '.$@);
-	}
-	$LOG->info("\tDONE!");
-	
-	# First, explicitly create the caching directory
-	my $workingDir = BP::DCCLoader::WorkingDir->new($cachingDir);
-	
-	# Defined outside
-	my($p_Gencode,$p_PAR,$p_GThash) = BP::DCCLoader::Parsers::GencodeGTFParser::getGencodeCoordinates($model,$workingDir,$ini);
-	# Collapsing Gencode unique genes and transcripts into Ensembl's hash
-	@{$p_GThash}{keys(%{$p_PAR})} = values(%{$p_PAR});
-	
-	# Now, we are going to have a forest, where each interval tree is a chromosome
-	$LOG->info("Generating interval forest");
-	my %trees = ();
-	foreach my $node (values(%{$p_GThash})) {
-		if($node->{feature} eq 'gene') {
-			my $p_coord = $node->{coordinates}[0];
-			my $tree;
-			if(exists($trees{$p_coord->{chromosome}})) {
-				$tree = $trees{$p_coord->{chromosome}};
-			} else {
-				$tree = Set::IntervalTree->new();
-				$trees{$p_coord->{chromosome}} = $tree;
-			}
-			
-			# As ranges are half-open, take it into account
-			$tree->insert($node,$p_coord->{chromosome_start},$p_coord->{chromosome_end}+1);
-		}
-	}
-	$LOG->info("Interval forest ready!");
-	
 	# The elasticsearch database connection
-	my $es = Search::Elasticsearch->new(@connParams,'nodes' => $confValues{nodes});
-	# Setting up the parameters to the JSON serializer
-	$es->transport->serializer->JSON->convert_blessed;
+	my $es;
 	
 	unless($doSimul) {
-		if($doClean) {
-			foreach my $indexName (values(%QTL_INDEXES)) {
-				$es->indices->delete('index' => $indexName)  if($es->indices->exists('index' => $indexName));
-			}
-		}
-		foreach my $mappingName (keys(%QTL_TYPES)) {
-			my $indexName = $QTL_INDEXES{$mappingName};
-			$es->indices->create('index' => $indexName)  unless($es->indices->exists('index' => $indexName));
-			$es->indices->put_mapping(
-				'index' => $indexName,
-				'type' => $mappingName,
-				'body' => {
-					$mappingName => $QTL_TYPES{$mappingName}
-				}
-			);
-		}
+		$es = Search::Elasticsearch->new(@connParams,'nodes' => $confValues{nodes});
+		# Setting up the parameters to the JSON serializer
+		$es->transport->serializer->JSON->convert_blessed;
 	}
 	
-	foreach my $file (@ARGV) {
+	my %alreadyCleansed = ();
+	my %alreadyTypeCreated = ();
+	
+	$LOG->info("File insertion");
+	foreach my $file (@{$p_files}) {
 		my $basename = File::Basename::basename($file);
 		
 		# Three different types of files
@@ -545,17 +725,48 @@ if(scalar(@ARGV)>=3) {
 		}
 		my $indexName = $QTL_INDEXES{$mappingName};
 		
+		unless($doSimul) {
+			if($doClean && !exists($alreadyCleansed{$indexName})) {
+				if($es->indices->exists('index' => $indexName)) {
+					$LOG->info("Removing index $indexName (and its type mappings)");
+					$es->indices->delete('index' => $indexName);
+				}
+				
+				$alreadyCleansed{$indexName} = undef;
+			}
+			
+			unless(exists($alreadyTypeCreated{$mappingName})) {
+				unless($es->indices->exists('index' => $indexName)) {
+					$LOG->info("Creating index $indexName");
+					$es->indices->create('index' => $indexName);
+				}
+			
+				$LOG->info("Assuring type mapping $mappingName exists on index $indexName");
+				$es->indices->put_mapping(
+					'index' => $indexName,
+					'type' => $mappingName,
+					'body' => {
+						$mappingName => $QTL_TYPES{$mappingName}
+					}
+				);
+				$alreadyTypeCreated{$mappingName} = undef;
+			}
+		}
+		
 		$LOG->info("Processing $file (cell type $cell_type, type $fileType, source $qtl_source)");
 		if(open(my $CSV,'<:encoding(UTF-8)',$file)) {
-			
-			my @bes_params = (
-				index   => $indexName,
-				type    => $mappingName,
-			);
-			push(@bes_params,'max_count' => $ini->val($BP::Loader::Mapper::SECTION,BP::Loader::Mapper::BATCH_SIZE_KEY))  if($ini->exists($BP::Loader::Mapper::SECTION,BP::Loader::Mapper::BATCH_SIZE_KEY));
+			my $bes;
 			
 			# The bulk helper (for massive insertions)
-			my $bes = $es->bulk_helper(@bes_params);
+			unless($doSimul) {
+				my @bes_params = (
+					index   => $indexName,
+					type    => $mappingName,
+				);
+				push(@bes_params,'max_count' => $ini->val($BP::Loader::Mapper::SECTION,BP::Loader::Mapper::BATCH_SIZE_KEY))  if($ini->exists($BP::Loader::Mapper::SECTION,BP::Loader::Mapper::BATCH_SIZE_KEY));
+				
+				$bes = $es->bulk_helper(@bes_params);
+			}
 
 			unless(defined($colsLine)) {
 				$colsLine = <$CSV>;
@@ -599,7 +810,11 @@ if(scalar(@ARGV)>=3) {
 								'qtl_data' => $bulkData,
 							);
 							
-							$bes->index({ 'source' => \%entry })  unless($doSimul);
+							if($doSimul) {
+								print STDERR $J->encode(\%entry),"\n";
+							} else {
+								$bes->index({ 'source' => \%entry });
+							}
 						}
 						$bulkGeneId = $vals[0];
 						$bulkData = '';
@@ -609,10 +824,11 @@ if(scalar(@ARGV)>=3) {
 					my %data = ();
 					@data{@cols} = @vals;
 					
+					my $qtl_id = $data{$geneIdKey};
 					my %entry = (
 						'cell_type' => \@cell_types,
 						'qtl_source' => $qtl_source,
-						'gene_id' => $data{$geneIdKey},
+						'gene_id' => $qtl_id,
 					);
 					
 					$entry{'gene_name'} = $data{'HGNC symbol'}  if(exists($data{'HGNC symbol'}));
@@ -655,7 +871,27 @@ if(scalar(@ARGV)>=3) {
 					}
 					$entry{'variability'} = \@variabilities;
 					
-					$bes->index({ 'source' => \%entry })  unless($doSimul);
+					# And now, the associated chart
+					if(exists($p_chartMapping->{$qtl_id})) {
+						if(open(my $CH,'<:bytes',$p_chartMapping->{$qtl_id})) {
+							local $/;
+							binmode($CH);
+							my $pngChart = <$CH>;
+							close($CH);
+							
+							$entry{'associated_chart'} = MIME::Base64::encode($pngChart);
+						} else {
+							$LOG->warn("Unable to read chart for $qtl_id from ".$p_chartMapping->{$qtl_id});
+						}
+					} else {
+						$LOG->warn("Missing chart for $qtl_id");
+					}
+					
+					if($doSimul) {
+						print STDERR $J->encode(\%entry),"\n";
+					} else {
+						$bes->index({ 'source' => \%entry });
+					}
 				} else {
 					my %data = ();
 					@data{@cols} = @vals;
@@ -666,6 +902,40 @@ if(scalar(@ARGV)>=3) {
 						'gene_id' => $data{$geneIdKey},
 						'snp_id' => $data{$snpIdKey},
 					);
+					
+					# Now, let's set the dbSNP additional data
+					my $doCoordMapping = undef;
+					my $doRsIdMapping = undef;
+					if($entry{'snp_id'} =~ /^rs[0-9]+$/) {
+						if(exists($p_rsIdMapping->{$entry{'snp_id'}})) {
+							$doCoordMapping = 1;
+						} else {
+							$entry{'rsId'} = [ $entry{'snp_id'} ];
+						}
+					} elsif($entry{'snp_id'} =~ /^snp([0-9]+)_chr(.+)$/) {
+						# Curating the format of anonymous SNPs
+						$entry{'pos'} = $1;
+						
+						# We need the chromosome from this perspective
+						$doRsIdMapping = $2;
+					} elsif($entry{'snp_id'} =~ /^([^:]+):([0-9]+)$/) {
+						$entry{'pos'} = $2  unless(exists($entry{'pos'}));
+						
+						# We need the chromosome from this perspective
+						$doRsIdMapping = $1;
+					}
+					
+					if(defined($doCoordMapping)) {
+						my $p_mapping = $p_rsIdMapping->{$entry{'snp_id'}};
+						foreach my $key ('pos','rsId','dbSnpRef','dbSnpAlt','MAF') {
+							$entry{$key} = $p_mapping->{$key};
+						}
+					} elsif(defined($doRsIdMapping) && exists($p_coordMapping->{$doRsIdMapping}) && exists($p_coordMapping->{$doRsIdMapping}{$entry{'pos'}}) && defined($p_coordMapping->{$doRsIdMapping}{$entry{'pos'}})) {
+						my $p_mapping = $p_coordMapping->{$doRsIdMapping}{$entry{'pos'}};
+						foreach my $key ('rsId','dbSnpRef','dbSnpAlt','MAF') {
+							$entry{$key} = $p_mapping->{$key};
+						}
+					}
 					
 					if($fileType eq DATA_FILETYPE) {
 						$entry{'gene_chrom'} = $data{'gene_chrom'};
@@ -745,8 +1015,8 @@ if(scalar(@ARGV)>=3) {
 						} else {
 							print STDERR "$qtl_source ENSID NOT FOUND $ensemblGeneId\n";
 						}
-					} elsif(exists($trees{$entry{'gene_chrom'}})) {
-						my $tree = $trees{$entry{'gene_chrom'}};
+					} elsif(exists($p_trees->{$entry{'gene_chrom'}})) {
+						my $tree = $p_trees->{$entry{'gene_chrom'}};
 						
 						# Fetching the genes overlapping these coordinates
 						my @geneNames = ();
@@ -773,7 +1043,11 @@ if(scalar(@ARGV)>=3) {
 						$LOG->info("Mira cell_type => $cell_type, qtl_source => $qtl_source, gene_id => $entry{gene_id}");
 					}
 					
-					$bes->index({ 'source' => \%entry })  unless($doSimul);
+					if($doSimul) {
+						print STDERR $J->encode(\%entry),"\n";
+					} else {
+						$bes->index({ 'source' => \%entry });
+					}
 				}
 				#use Data::Dumper;
 				#print Dumper(\%entry),"\n";
@@ -787,16 +1061,180 @@ if(scalar(@ARGV)>=3) {
 					'qtl_data' => $bulkData,
 				);
 				
-				$bes->index({ 'source' => \%entry })  unless($doSimul);
+				if($doSimul) {
+					print STDERR $J->encode(\%entry),"\n";
+				} else {
+					$bes->index({ 'source' => \%entry });
+				}
 			}
 			
 			$bes->flush()  unless($doSimul);
 			
 			close($CSV);
 		} else {
-			Carp::croak("[ERROR] Unable to open $file. Reason: ".$!);
+			$LOG->logcroak("[ERROR] Unable to open $file. Reason: ".$!);
 		}
 	}
+}
+
+if(scalar(@ARGV) > 0 && $ARGV[0] eq '-C') {
+	$doClean = 1;
+	shift(@ARGV);
+}
+
+if(scalar(@ARGV) > 0 && $ARGV[0] eq '-s') {
+	shift(@ARGV);
+	$doSimul = 1;
+	
+	use JSON qw();
+	$J = JSON->new()->pretty(1)->convert_blessed(1)
+}
+
+if(scalar(@ARGV)>=3) {
+	# First, let's read the configuration
+	my $iniFile = shift(@ARGV);
+	# Defined outside
+	my $cachingDir = shift(@ARGV);
+	
+	my $ini = Config::IniFiles->new(-file => $iniFile, -default => 'main');
+	
+	# Getting the path to dbSNP file
+	my $dbsnp_ftp_base = undef;
+	my $dbsnp_vcf_file = undef;
+	my $dbsnp_vcf_tbi_file = undef;
+	if($ini->exists(BP::DCCLoader::Parsers::DCC_LOADER_SECTION,DBSNP_BASE_TAG)) {
+		$dbsnp_ftp_base = $ini->val(BP::DCCLoader::Parsers::DCC_LOADER_SECTION,DBSNP_BASE_TAG);
+	} else {
+		$LOG->logcroak("Configuration file $iniFile must have '".DBSNP_BASE_TAG."'");
+	}
+	if($ini->exists(BP::DCCLoader::Parsers::DCC_LOADER_SECTION,DBSNP_VCF_TAG)) {
+		$dbsnp_vcf_file = $ini->val(BP::DCCLoader::Parsers::DCC_LOADER_SECTION,DBSNP_VCF_TAG);
+	} else {
+		$LOG->logcroak("Configuration file $iniFile must have '".DBSNP_VCF_TAG."'");
+	}
+	
+	
+	# Filtering images directories from the files
+	my @files = ();
+	my %chartMapping = ();
+	foreach my $file (@ARGV) {
+		if(-d $file) {
+			# Let's gather all the PNG files from the directory
+			if(opendir(my $IMGDIR,$file)) {
+				while(my $entry = readdir($IMGDIR)) {
+					if($entry =~ /^(.+)\.png$/) {
+						my $qtl_id = $1;
+						my $fullEntry = File::Spec->catfile($file,$entry);
+						
+						if(-f $fullEntry && -r $fullEntry) {
+							# Storing the full path for later processing
+							$chartMapping{$qtl_id} = $fullEntry;
+						}
+					}
+				}
+				
+				closedir($IMGDIR);
+			} else {
+				$LOG->logcroak("ERROR: Unable to open charts directory $file. Reason: ".$!);
+			}
+		} else {
+			push(@files,$file);
+		}
+	}
+	
+	if(scalar(@files) == 0) {
+		$LOG->logdie("This program needs at least one data file to insert.");
+	}
+
+	# Zeroth, load the data model
+	
+	# Let's parse the model
+	my $modelFile = $ini->val($BP::Loader::Mapper::SECTION,'model');
+	# Setting up the right path on relative cases
+	$modelFile = File::Spec->catfile(File::Basename::dirname($iniFile),$modelFile)  unless(File::Spec->file_name_is_absolute($modelFile));
+
+	$LOG->info("Parsing model $modelFile...");
+	my $model = undef;
+	eval {
+		$model = BP::Model->new($modelFile);
+	};
+	
+	if($@) {
+		$LOG->logcroak('ERROR: Model parsing and validation failed. Reason: '.$@);
+	}
+	$LOG->info("\tDONE!");
+	
+	# Now, let's patch the properies of the different remote resources, using the properties inside the model
+	eval {
+		$model->annotations->applyAnnotations(\($dbsnp_ftp_base,$dbsnp_vcf_file));
+		$dbsnp_vcf_tbi_file = $dbsnp_vcf_file . '.tbi';
+	};
+	
+	# First, explicitly create the caching directory
+	my $workingDir = BP::DCCLoader::WorkingDir->new($cachingDir);
+	
+	# And translate dbSNP uri to URI objects
+	$dbsnp_ftp_base = URI->new($dbsnp_ftp_base);
+	
+	# Fetching dbSNP file in compressed VCF format, as well as its index
+	my $localDbSnpVCFFile;
+	my $localDbSnpVCFtbiFile;
+	{
+		# Defined outside
+		my $ftpServer = undef;
+		
+		# Fetching FTP resources
+		$LOG->info("Connecting to $dbsnp_ftp_base...");
+		
+		my $dbSnpHost = $dbsnp_ftp_base->host();
+		$ftpServer = Net::FTP::AutoReconnect->new($dbSnpHost,Debug=>0) || $LOG->logcroak("FTP connection to server ".$dbSnpHost." failed: ".$@);
+		$ftpServer->login(BP::DCCLoader::WorkingDir::ANONYMOUS_USER,BP::DCCLoader::WorkingDir::ANONYMOUS_PASS) || $LOG->logcroak("FTP login to server $dbSnpHost failed: ".$ftpServer->message());
+		$ftpServer->binary();
+		
+		my $dbSnpPath = $dbsnp_ftp_base->path;
+		
+		$localDbSnpVCFFile = $workingDir->cachedGet($ftpServer,$dbSnpPath.'/'.$dbsnp_vcf_file);
+		$LOG->logcroak("FATAL ERROR: Unable to fetch file $dbsnp_vcf_file from $dbSnpPath (host $dbSnpHost)")  unless(defined($localDbSnpVCFFile));
+		
+		$localDbSnpVCFtbiFile = $workingDir->cachedGet($ftpServer,$dbSnpPath.'/'.$dbsnp_vcf_tbi_file);
+		$LOG->logcroak("FATAL ERROR: Unable to fetch file $dbsnp_vcf_tbi_file from $dbSnpPath (host $dbSnpHost)")  unless(defined($localDbSnpVCFtbiFile));
+		
+		$ftpServer->disconnect()  if($ftpServer->can('disconnect'));
+		$ftpServer->quit()  if($ftpServer->can('quit'));
+		$ftpServer = undef;
+	}
+	
+	# Defined outside
+	my($p_Gencode,$p_PAR,$p_GThash) = BP::DCCLoader::Parsers::GencodeGTFParser::getGencodeCoordinates($model,$workingDir,$ini);
+	# Collapsing Gencode unique genes and transcripts into Ensembl's hash
+	@{$p_GThash}{keys(%{$p_PAR})} = values(%{$p_PAR});
+	
+	# Now, we are going to have a forest, where each interval tree is a chromosome
+	$LOG->info("Generating interval forest");
+	my %trees = ();
+	foreach my $node (values(%{$p_GThash})) {
+		if($node->{feature} eq 'gene') {
+			my $p_coord = $node->{coordinates}[0];
+			my $tree;
+			if(exists($trees{$p_coord->{chromosome}})) {
+				$tree = $trees{$p_coord->{chromosome}};
+			} else {
+				$tree = Set::IntervalTree->new();
+				$trees{$p_coord->{chromosome}} = $tree;
+			}
+			
+			# As ranges are half-open, take it into account
+			$tree->insert($node,$p_coord->{chromosome_start},$p_coord->{chromosome_end}+1);
+		}
+	}
+	$LOG->info("Interval forest ready!");
+	
+	# First pass, dbSNP rsId extraction for recognized files
+	my($p_rsIdMapping,$p_coordMapping) = rsIdRemapper($localDbSnpVCFFile,@files);
+	
+	# Second pass, file insertion
+	bulkInsertion($ini,%{$p_GThash},%trees,%{$p_rsIdMapping},%{$p_coordMapping},%chartMapping,@files);
+	$LOG->info("Insertions finished");
 } else {
-	print STDERR "Usage: $0 [-C] [-s] {ini file} {caching dir} {tab file}+\n";
+	print STDERR "Usage: $0 [-C] [-s] {ini file} {caching dir} {images_dirs}* {tab file}+\n";
 }
