@@ -248,7 +248,7 @@ my %QTL_TYPES = (
 			},
 			# Common columns
 			# 'geneID' is really the QTL id
-			'gene_id'	=> {
+			'qtl_id'	=> {	# Probe ID or EnsemblID
 				'dynamic'	=>	boolean::false,
 				'type'	=>	'string',
 				'index' => 'not_analyzed',
@@ -272,6 +272,11 @@ my %QTL_TYPES = (
 				'index' => 'not_analyzed',
 			},
 			'ensemblGeneId'	=> {	# Ensembl ID
+				'dynamic'	=>	boolean::false,
+				'type'	=>	'string',
+				'index' => 'not_analyzed',
+			},
+			'probeId'	=> {	# Probe ID
 				'dynamic'	=>	boolean::false,
 				'type'	=>	'string',
 				'index' => 'not_analyzed',
@@ -865,7 +870,7 @@ sub bulkInsertion($\%\%\%\%\%\@) {
 					my %entry = (
 						'cell_type' => \@cell_types,
 						'qtl_source' => $qtl_source,
-						'gene_id' => $qtl_id,
+						'qtl_id' => $qtl_id,
 					);
 					
 					$entry{'gene_name'} = $data{'HGNC symbol'}  if(exists($data{'HGNC symbol'}));
@@ -873,27 +878,26 @@ sub bulkInsertion($\%\%\%\%\%\@) {
 					$entry{'pos'} = $data{'Location'}  if(exists($data{'Location'}));
 					$entry{'arm'} = $data{'Arm'}  if(exists($data{'Arm'}));
 					$entry{'ensemblGeneId'} = $data{'Ensembl ID'}  if(exists($data{'Ensembl ID'}));
+					$entry{'probeId'} = $data{'Probe ID'}  if(exists($data{'Probe ID'}));
 					$entry{'feature'} = $data{'Feature'}  if(exists($data{'Feature'}));
 					
+					my @chromatin_states = ();
 					if(exists($data{'Chromatin state'})) {
-						$entry{'chromatin_state'} = {
+						push(@chromatin_states,{
 							'cell_type' => $cell_type,
 							'state' => $data{'Chromatin state'}
-						};
+						});
 					} else {
-						my @chromatin_states = ();
-						my $someExisted = undef;
 						foreach my $chroKey (keys(%chromatin_keys)) {
 							if(exists($data{$chroKey})) {
-								$someExisted = 1;
 								push(@chromatin_states, {
 									'cell_type' => $chromatin_keys{$chroKey}{'cell_type'},
 									'state' => $data{$chroKey}
 								});
 							}
 						}
-						$entry{'chromatin_state'} = \@chromatin_states  if($someExisted);
 					}
+					$entry{'chromatin_state'} = \@chromatin_states  if(scalar(@chromatin_states) > 0);
 					
 					if(exists($data{'GO term'})) {
 						my @go = split(/ *, */,$data{'GO term'});
