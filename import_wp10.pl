@@ -247,8 +247,8 @@ my %QTL_TYPES = (
 				'index' => 'not_analyzed',
 			},
 			# Common columns
-			# 'geneID' is really the QTL id
-			'qtl_id'	=> {	# Probe ID or EnsemblID
+			# 'geneID' is really the hypervariability id
+			'hvar_id'	=> {	# Probe ID or EnsemblID
 				'dynamic'	=>	boolean::false,
 				'type'	=>	'string',
 				'index' => 'not_analyzed',
@@ -261,6 +261,14 @@ my %QTL_TYPES = (
 				'dynamic'	=>	boolean::false,
 				'type'	=>	'string',
 				'index' => 'not_analyzed',
+			},
+			'gene_start'	=> {	# Enriched/added by this script
+				'dynamic'	=>	boolean::false,
+				'type'	=>	'long',
+			},
+			'gene_end'	=> {	# Enriched/added by this script
+				'dynamic'	=>	boolean::false,
+				'type'	=>	'long',
 			},
 			'pos'	=> {	# Location
 				'dynamic'	=>	boolean::false,
@@ -866,18 +874,18 @@ sub bulkInsertion($\%\%\%\%\%\@) {
 					my %data = ();
 					@data{@cols} = @vals;
 					
-					my $qtl_id = $data{$geneIdKey};
+					my $hvar_id = $data{$geneIdKey};
 					my %entry = (
 						'cell_type' => \@cell_types,
 						'qtl_source' => $qtl_source,
-						'qtl_id' => $qtl_id,
+						'hvar_id' => $hvar_id,
 					);
 					
-					$entry{'gene_name'} = $data{'HGNC symbol'}  if(exists($data{'HGNC symbol'}));
+					$entry{'gene_name'} = $data{'HGNC symbol'}  if(exists($data{'HGNC symbol'}) && length($data{'HGNC symbol'}) > 0);
 					$entry{'gene_chrom'} = $data{'Chr'}  if(exists($data{'Chr'}));
-					$entry{'pos'} = $data{'Location'}  if(exists($data{'Location'}));
+					$entry{'pos'} = $data{'Location'} + 0  if(exists($data{'Location'}));
 					$entry{'arm'} = $data{'Arm'}  if(exists($data{'Arm'}));
-					$entry{'ensemblGeneId'} = $data{'Ensembl ID'}  if(exists($data{'Ensembl ID'}));
+					$entry{'ensemblGeneId'} = $data{'Ensembl ID'}  if(exists($data{'Ensembl ID'}) && length($data{'Ensembl ID'}) > 0);
 					$entry{'probeId'} = $data{'Probe ID'}  if(exists($data{'Probe ID'}));
 					$entry{'feature'} = $data{'Feature'}  if(exists($data{'Feature'}));
 					
@@ -911,10 +919,34 @@ sub bulkInsertion($\%\%\%\%\%\@) {
 						}
 					}
 					$entry{'variability'} = \@variabilities;
+
+					if(exists($entry{'ensemblGeneId'}) && !exists($entry{'pos'})) {
+						my $ensemblGeneId = $entry{'ensemblGeneId'};
+						# Fetching the gene coordinates
+						my $rPointPlace = rindex($ensemblGeneId,'.');
+						$ensemblGeneId = substr($ensemblGeneId,0,$rPointPlace)  if($rPointPlace != -1);
+						
+						if(exists($p_GThash->{$ensemblGeneId})) {
+							my $p_data = $p_GThash->{$ensemblGeneId};
+							unless(exists($entry{'gene_chrom'}) && exists($entry{'gene_start'}) && exists($entry{'gene_end'})) {
+								my $p_coordinates = $p_data->{'coordinates'}[0];
+								$entry{'gene_chrom'} = $p_coordinates->{'chromosome'};
+								$entry{'gene_start'} = $p_coordinates->{'chromosome_start'};
+								$entry{'gene_end'} = $p_coordinates->{'chromosome_end'};
+							}
+							
+							$entry{'gene_name'} = getMainSymbol($p_data)  unless(exists($entry{'gene_name'}));
+						} else {
+							print STDERR "$qtl_source ENSID NOT FOUND $ensemblGeneId\n";
+						}
+					} elsif(exists($entry{'pos'})) {
+						# Used to allow sorting
+						$entry{'gene_start'} = $entry{'pos'};
+					}
 					
 					# And now, the associated chart
-					if(exists($p_chartMapping->{$qtl_id})) {
-						if(open(my $CH,'<:bytes',$p_chartMapping->{$qtl_id})) {
+					if(exists($p_chartMapping->{$hvar_id})) {
+						if(open(my $CH,'<:bytes',$p_chartMapping->{$hvar_id})) {
 							local $/;
 							binmode($CH);
 							my $pngChart = <$CH>;
@@ -922,10 +954,10 @@ sub bulkInsertion($\%\%\%\%\%\@) {
 							
 							$entry{'associated_chart'} = MIME::Base64::encode($pngChart);
 						} else {
-							$LOG->warn("Unable to read chart for $qtl_id from ".$p_chartMapping->{$qtl_id});
+							$LOG->warn("Unable to read chart for $hvar_id from ".$p_chartMapping->{$hvar_id});
 						}
 					} else {
-						$LOG->warn("Missing chart for $qtl_id");
+						$LOG->warn("Missing chart for $hvar_id");
 					}
 					
 					if($doSimul) {
@@ -1041,18 +1073,19 @@ sub bulkInsertion($\%\%\%\%\%\@) {
 					if(exists($entry{'ensemblGeneId'})) {
 						my $ensemblGeneId = $entry{'ensemblGeneId'};
 						# Fetching the gene coordinates
-						$ensemblGeneId = substr($ensemblGeneId,0,rindex($ensemblGeneId,'.'));
+						my $rPointPlace = rindex($ensemblGeneId,'.');
+						$ensemblGeneId = substr($ensemblGeneId,0,$rPointPlace)  if($rPointPlace != -1);
 						
 						if(exists($p_GThash->{$ensemblGeneId})) {
 							my $p_data = $p_GThash->{$ensemblGeneId};
-							unless(exists($entry{'gene_chrom'})) {
+							unless(exists($entry{'gene_chrom'}) && exists($entry{'gene_start'}) && exists($entry{'gene_end'})) {
 								my $p_coordinates = $p_data->{'coordinates'}[0];
 								$entry{'gene_chrom'} = $p_coordinates->{'chromosome'};
 								$entry{'gene_start'} = $p_coordinates->{'chromosome_start'};
 								$entry{'gene_end'} = $p_coordinates->{'chromosome_end'};
 							}
 							
-							$entry{'gene_name'} = getMainSymbol($p_data);
+							$entry{'gene_name'} = getMainSymbol($p_data)  unless(exists($entry{'gene_name'}));
 						} else {
 							print STDERR "$qtl_source ENSID NOT FOUND $ensemblGeneId\n";
 						}
@@ -1170,12 +1203,12 @@ if(scalar(@ARGV)>=3) {
 			if(opendir(my $IMGDIR,$file)) {
 				while(my $entry = readdir($IMGDIR)) {
 					if($entry =~ /^(.+)\.png$/) {
-						my $qtl_id = $1;
+						my $hvar_id = $1;
 						my $fullEntry = File::Spec->catfile($file,$entry);
 						
 						if(-f $fullEntry && -r $fullEntry) {
 							# Storing the full path for later processing
-							$chartMapping{$qtl_id} = $fullEntry;
+							$chartMapping{$hvar_id} = $fullEntry;
 						}
 					}
 				}
