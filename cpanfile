@@ -1,0 +1,13 @@
+requires 'FindBin';
+requires 'boolean','0.32';
+requires 'Carp';
+requires 'Config::IniFiles';
+requires 'Cwd';
+requires 'File::Basename';
+requires 'File::Spec';
+requires 'File::Temp';
+requires 'Log::Log4perl';
+requires 'MIME::Base64';
+requires 'Net::FTP::AutoReconnect';
+requires 'Search::Elasticsearch', '1.12';
+requires 'Set::IntervalTree';
