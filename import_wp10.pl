@@ -347,9 +347,13 @@ my @variability_keys = (
 	'Neutrophil count',
 	'Neutrophil percentage',
 	'Neutrophil granularity',
+	'Neutrophil cellular count',
 	'Neutrophil cellular content',
 	'Lymphocyte count',
 	'Lymphocyte percentage',
+	'Maximum temperature',
+	'Minimum temperature',
+	'Daylight',
 	'Analysis day'
 #	'Alysis day'
 );
@@ -761,7 +765,7 @@ sub bulkInsertion($\%\%\%\%\%\@) {
 			$fileType = SQTLSEEKER_FILETYPE;
 			$geneIdKey = 'geneId';
 			$snpIdKey = 'snpId';
-		} elsif($basename =~ /^([^_]+)_([^_]+)_hypervar_S[13]\.txt\.csv$/) {
+		} elsif($basename =~ /^([^_]+)_([^_]+)_hypervar_[^_.]+\.txt\.csv$/) {
 			$mappingName = VARIABILITY_WP10_TYPE;
 			$cell_type = $1;
 			@cell_types = split(/\+/,$cell_type);
