@@ -1,7 +1,13 @@
 BLUEPRINT WP10 data loader
 =======================
 
-This data loader takes the data available at ftp://ftp.ebi.ac.uk/pub/databases/blueprint/blueprint_Epivar/ (files at `Pheno_Matrix` and `qtl_as`), and it stores the contents into the Elasticsearch database instance used by BLUEPRINT WP10 data portal.
+This data loader takes the data available at ftp://ftp.ebi.ac.uk/pub/databases/blueprint/blueprint_Epivar/ (files at `qtl_as`), and it stores the contents into the Elasticsearch database instance used by BLUEPRINT WP10 data portal.
+
+It also needs the correspondence between methylation probe ids and their positions. It can be generated using [gen450kManifest.bash](gen450kManifest.bash) script, running next command line:
+
+```
+bash gen450kManifest.bash meth_450K_pos.txt
+```
 
 This Perl script depends on the dependencies listed in [cpanfile](cpanfile), which can be installed using [cpanm](http://search.cpan.org/~miyagawa/App-cpanminus-1.7042/bin/cpanm) using a sentence like:
 
