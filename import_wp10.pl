@@ -40,7 +40,8 @@ use constant INI_SECTION	=>	'elasticsearch';
 use constant {
 	DBSNP_BASE_TAG	=>	'dbsnp-ftp-base-uri',
 	DBSNP_VCF_TAG	=>	'dbsnp-vcf',
-	DBSNP_MERGED_TABLE_TAG	=>	'dbsnp-merged-table'
+	DBSNP_MERGED_TABLE_TAG	=>	'dbsnp-merged-table',
+	MANIFEST_TAG	=>	'manif450k',
 };
 
 use constant DEFAULT_WP10_INDEX	=>	'wp10qtls';
@@ -54,7 +55,10 @@ use constant VARIABILITY_WP10_TYPE	=>	'qtl_variability';
 use constant DATA_FILETYPE	=>	'data';
 use constant SQTLSEEKER_FILETYPE	=>	'sqtlseeker';
 use constant BULK_FILETYPE	=>	'bulk';
+use constant BULK_FILETYPE_2	=>	'bulk2';
 use constant VARIABILITY_FILETYPE	=>	'variability';
+
+use constant WP10_ANALYSIS_GROUP	=>	'WP10';
 
 my %QTL_TYPES = (
 	DEFAULT_WP10_TYPE() => {
@@ -74,8 +78,17 @@ my %QTL_TYPES = (
 				'type'	=>	'string',
 				'index' => 'not_analyzed',
 			},
+			# This field is to distinguish among the different analysis groups
+			# WP10 => the original one
+			# WASP CHT => WASP CHT
+			# WASP ASE => WASP ASE
+			'an_group' => {
+				'dynamic'	=>	boolean::false,
+				'type'	=>	'string',
+				'index' => 'not_analyzed',
+			},
 			# Common columns
-			# 'geneID'
+			# 'geneID' is the phenotype id
 			'gene_id'	=> {
 				'dynamic'	=>	boolean::false,
 				'type'	=>	'string',
@@ -85,6 +98,11 @@ my %QTL_TYPES = (
 				'dynamic'	=>	boolean::false,
 				'type'	=>	'string',
 			},
+			'snp_def'	=> {
+				'dynamic'	=>	boolean::false,
+				'type'	=>	'string',
+				'index' => 'not_analyzed',
+			},
 			# 'rs', 'snpId'
 			'snp_id'	=> {
 				'dynamic'	=>	boolean::false,
@@ -92,6 +110,16 @@ my %QTL_TYPES = (
 				'index' => 'not_analyzed',
 			},
 			'rsId'	=> {
+				'dynamic'	=>	boolean::false,
+				'type'	=>	'string',
+				'index' => 'not_analyzed',
+			},
+			'snpRef'	=> {
+				'dynamic'	=>	boolean::false,
+				'type'	=>	'string',
+				'index' => 'not_analyzed',
+			},
+			'snpAlt'	=> {
 				'dynamic'	=>	boolean::false,
 				'type'	=>	'string',
 				'index' => 'not_analyzed',
@@ -124,6 +152,10 @@ my %QTL_TYPES = (
 				'type'	=>	'long',
 			},
 			'MAF'	=> {
+				'dynamic'	=>	boolean::false,
+				'type'	=>	'double',
+			},
+			'altAF'	=> {
 				'dynamic'	=>	boolean::false,
 				'type'	=>	'double',
 			},
@@ -214,7 +246,16 @@ my %QTL_TYPES = (
 				'type'	=>	'string',
 				'index' => 'not_analyzed',
 			},
-			# 'geneID'
+			# This field is to distinguish among the different analysis groups
+			# WP10 => the original one
+			# WASP CHT => WASP CHT
+			# WASP ASE => WASP ASE
+			'an_group' => {
+				'dynamic'	=>	boolean::false,
+				'type'	=>	'string',
+				'index' => 'not_analyzed',
+			},
+			# 'geneID' is the phenotype id
 			'gene_id'	=> {
 				'dynamic'	=>	boolean::false,
 				'type'	=>	'string',
@@ -431,7 +472,6 @@ sub rsIdRemapper($$\@) {
 			my $basename = File::Basename::basename($file);
 			
 			# Three different types of files
-			my $mappingName;
 			my $colsLine;
 			my $colSep;
 			my $fileType;
@@ -442,42 +482,73 @@ sub rsIdRemapper($$\@) {
 			my $snpIdKey;
 			
 			if($basename =~ /^([^_.]+)[_.]([^_]+)_(.+)_summary\.hdf5\.txt$/) {
-				$mappingName = DEFAULT_WP10_TYPE;
+				$fileType = DATA_FILETYPE;
 				$cell_type = $1;
 				$qtl_source = $2;
+				
 				$colSep = qr/\t/;
-				$fileType = DATA_FILETYPE;
 				$geneIdKey = 'geneID';
 				$snpIdKey = 'rs';
 			} elsif($basename =~ /^([^.]+)\.([^.]+)\.sig5\.tsv$/) {
-				$mappingName = DEFAULT_WP10_TYPE;
+				$fileType = SQTLSEEKER_FILETYPE;
 				$cell_type = $1;
 				$qtl_source = $2;
+				
 				$colSep = qr/\t/;
-				$fileType = SQTLSEEKER_FILETYPE;
 				$geneIdKey = 'geneId';
 				$snpIdKey = 'snpId';
+			} elsif($basename =~ /^([^_.]+)[_.]([^_]+)_(.+)_all_summary\.txt\.gz$/) {
+				$fileType = BULK_FILETYPE_2;
+				$cell_type = $1;
+				$qtl_source = $2;
+				
+				$colSep = ' ';
+				$geneIdKey = 'phenotypeID';
+				$snpIdKey = 'rsid';
+				$colsLine = join($colSep,'chr_pos_ref_alt',$snpIdKey,$geneIdKey,'p_value','beta','Bonferroni_p_value','FDR','alt_allele_frequency','std_error_of_beta');
+			} elsif($basename =~ /^([^_.]+)[_.]([^_]+)_(.+)_all[^.]*\.txt\.gz$/) {
+				$fileType = BULK_FILETYPE_2;
+				$cell_type = $1;
+				$qtl_source = $2;
+				
+				$colSep = ' ';
+				$geneIdKey = 'phenotypeID';
+				$snpIdKey = 'rsid';
+				# These files do not have the column of standard error of beta
+				$colsLine = join($colSep,'chr_pos_ref_alt',$snpIdKey,$geneIdKey,'p_value','beta','Bonferroni_p_value','FDR','alt_allele_frequency');
 			} else {
-				$LOG->info("SKipping file $file");
+				$LOG->info("Skipping file $file");
 				next;
 			}
 			
 			$LOG->info("Extracting rsIds from $file (cell type $cell_type, type $fileType, source $qtl_source)");
-			if(open(my $CSV,'<:encoding(UTF-8)',$file)) {
+			my $openMode;
+			my @openParams;
+			if($file =~ /\.gz$/) {
+				$openMode = '-|';
+				@openParams = ('gunzip','-c',$file);
+			} else {
+				$openMode = '<:encoding(UTF-8)';
+				@openParams = ($file);
+			}
+			if(open(my $CSV,$openMode,@openParams)) {
 				unless(defined($colsLine)) {
 					$colsLine = <$CSV>;
 					chomp($colsLine);
 				}
 				my @cols = split($colSep,$colsLine,-1);
 				
+				my $snpIdIdx = 0;
+				foreach my $col (@cols) {
+					last  if($col eq $snpIdKey);
+					$snpIdIdx++;
+				}
+				
 				while(my $line=<$CSV>) {
 					chomp($line);
 					my @vals = split($colSep,$line,-1);
 					
-					my %data = ();
-					@data{@cols} = @vals;
-					
-					my $snp_id = $data{$snpIdKey};
+					my $snp_id = $vals[$snpIdIdx];
 					if($snp_id =~ /^rs([0-9]+)$/) {
 						if(!exists($rsIdMapping{$snp_id})) {
 							$rsidCount++;
@@ -487,6 +558,12 @@ sub rsIdRemapper($$\@) {
 						if(!exists($coordMapping{$2}) || !exists($coordMapping{$2}{$1})) {
 							$coordMapping{$2} = {}  unless(exists($coordMapping{$2}));
 							$coordMapping{$2}{$1} = undef;
+							$coordCount ++;
+						}
+					} elsif($snp_id =~ /^chr([^-]+)-([0-9]+)$/) {
+						if(!exists($coordMapping{$1}) || !exists($coordMapping{$1}{$2})) {
+							$coordMapping{$1} = {}  unless(exists($coordMapping{$1}));
+							$coordMapping{$1}{$2} = undef;
 							$coordCount ++;
 						}
 					} elsif($snp_id =~ /^([^:]+):([0-9]+)$/) {
@@ -662,8 +739,495 @@ sub rsIdRemapper($$\@) {
 	return (\%rsIdMapping,\%coordMapping);
 }
 
-sub bulkInsertion($\%\%\%\%\%\@) {
-	my($ini,$p_GThash,$p_trees,$p_rsIdMapping,$p_coordMapping,$p_chartMapping,$p_files) = @_;
+# Hiding the variable to outside
+{
+	my %rsIdMapping = ();
+	my %coordMapping = ();
+
+sub posMapOne($$$) {
+	my($chr,$pos,$localDbSnpVCFFile) = @_;
+
+	unless(exists($coordMapping{$chr}) && exists($coordMapping{$chr}{$pos})) {
+		$coordMapping{$chr} = {}  unless(exists($coordMapping{$chr}));
+		$coordMapping{$chr}{$pos} = undef;
+
+		if(open(my $TABIX,'-|','tabix','-p','vcf',$localDbSnpVCFFile,"$chr:$pos-$pos")) {
+			while(my $line=<$TABIX>) {
+				next  if(substr($line,0,1) eq '#');
+				chomp($line);
+				
+				my($chromosome,$pos,$rsId,$REF,$ALT,undef,undef,$INFO) = split(/\t/,$line,-1);
+				
+				my $p_data;
+				if(defined($coordMapping{$chromosome}{$pos})) {
+					$p_data = $coordMapping{$chromosome}{$pos};
+				} else {
+					$p_data = {
+						'chromosome'	=> $chromosome,
+						'pos'	=> $pos+0,
+						'rsId'	=> [],
+						'dbSnpRef'	=> [],
+						'dbSnpAlt'	=> [],
+						'MAF'	=> []
+					};
+					
+					$coordMapping{$chromosome}{$pos} = $p_data;
+				}
+				
+				push(@{$p_data->{'rsId'}},$rsId);
+				push(@{$p_data->{'dbSnpRef'}},$REF);
+				push(@{$p_data->{'dbSnpAlt'}},$ALT);
+				
+				my $MAF = 2.0;
+				if($INFO =~ /CAF=([^;]+)/) {
+					my @alleleFreqs = split(/,/,$1,-1);
+					foreach my $alleleFreq (@alleleFreqs) {
+						next  if($alleleFreq eq '.');
+						
+						# Number normalization
+						$alleleFreq += 0.0;
+						
+						$MAF = $alleleFreq  if($MAF > $alleleFreq);
+					}
+				}
+				
+				# Assigning the minor allele frequency when the impossible value is not there
+				push(@{$p_data->{'MAF'}},($MAF < 2.0) ? $MAF : undef);
+			}
+			
+			close($TABIX);
+			
+			# And this step optimizes (a bit) future searches
+			if(defined($coordMapping{$chr}{$pos})) {
+				my $p_data = $coordMapping{$chr}{$pos};
+				
+				my $rsIdIdx = 0;
+				foreach my $rsId (@{$p_data->{'rsId'}}) {
+					unless(exists($rsIdMapping{$rsId})) {
+						$rsIdMapping{$rsId} = {
+							'chromosome'	=> $p_data->{'chromosome'},
+							'pos'	=> $p_data->{'pos'},
+							'rsId'	=> $rsId,
+							'dbSnpRef'	=> $p_data->{'dbSnpRef'}[$rsIdIdx],
+							'dbSnpAlt'	=> $p_data->{'dbSnpAlt'}[$rsIdIdx],
+							'MAF'	=> $p_data->{'MAF'}[$rsIdIdx]
+						};
+					}
+					
+					$rsIdIdx++;
+				}
+			}
+		} else {
+			$LOG->logcroak("[ERROR] Unable to run tabix on $localDbSnpVCFFile. Reason: ".$!);
+		}
+	}
+	
+	return $coordMapping{$chr}{$pos};
+}
+
+sub posMapMany(\@$) {
+	my($p_chr_pos_arr,$localDbSnpVCFFile) = @_;
+	
+	if(scalar(@{$p_chr_pos_arr}) > 0) {
+		my $one = undef;
+		my $COORDFILE = File::Temp->new(TEMPLATE => 'WP10-coord-XXXXXX',SUFFIX => '.txt',TMPDIR => 1);
+		my $coordFilename = $COORDFILE->filename();
+		
+		my %tabixCoords = ();
+		
+		foreach my $p_chr_pos (@{$p_chr_pos_arr}) {
+			my($chr,$pos) = @{$p_chr_pos};
+			
+			unless(exists($coordMapping{$chr}) && exists($coordMapping{$chr}{$pos})) {
+				$coordMapping{$chr} = {}  unless(exists($coordMapping{$chr}));
+				$coordMapping{$chr}{$pos} = undef;
+				
+				unless(exists($tabixCoords{$chr}) && exists($tabixCoords{$chr}{$pos})) {
+					$tabixCoords{$chr} = {}  unless(exists($tabixCoords{$chr}));
+					$tabixCoords{$chr}{$pos} = undef;
+				}
+				$one = 1;
+			}
+		}
+		
+		if($one) {
+			if(open(my $COORDFH,'>',$coordFilename)) {		
+				# Tabix wants its input query file ordered by coordinates
+				foreach my $chromosome (keys(%tabixCoords)) {
+					my @coords = sort { $a <=> $b } keys(%{$tabixCoords{$chromosome}});
+					foreach my $coord (@coords) {
+						print $COORDFH $chromosome,"\t",$coord,"\n";
+					}
+				}
+				close($COORDFH);
+			} else {
+				$LOG->logcroak("[ERROR] Unable to create temp $coordFilename. Reason: ".$!);
+			}
+			
+			if(open(my $TABIX,'-|','tabix','-p','vcf','-R',$coordFilename,$localDbSnpVCFFile)) {
+				while(my $line=<$TABIX>) {
+					next  if(substr($line,0,1) eq '#');
+					chomp($line);
+					
+					my($chromosome,$pos,$rsId,$REF,$ALT,undef,undef,$INFO) = split(/\t/,$line,-1);
+					
+					my $p_data;
+					if(defined($coordMapping{$chromosome}{$pos})) {
+						$p_data = $coordMapping{$chromosome}{$pos};
+					} else {
+						$p_data = {
+							'chromosome'	=> $chromosome,
+							'pos'	=> $pos+0,
+							'rsId'	=> [],
+							'dbSnpRef'	=> [],
+							'dbSnpAlt'	=> [],
+							'MAF'	=> []
+						};
+						
+						$coordMapping{$chromosome}{$pos} = $p_data;
+					}
+					
+					push(@{$p_data->{'rsId'}},$rsId);
+					push(@{$p_data->{'dbSnpRef'}},$REF);
+					push(@{$p_data->{'dbSnpAlt'}},$ALT);
+					
+					my $MAF = 2.0;
+					if($INFO =~ /CAF=([^;]+)/) {
+						my @alleleFreqs = split(/,/,$1,-1);
+						foreach my $alleleFreq (@alleleFreqs) {
+							next  if($alleleFreq eq '.');
+							
+							# Number normalization
+							$alleleFreq += 0.0;
+							
+							$MAF = $alleleFreq  if($MAF > $alleleFreq);
+						}
+					}
+					
+					# Assigning the minor allele frequency when the impossible value is not there
+					push(@{$p_data->{'MAF'}},($MAF < 2.0) ? $MAF : undef);
+				}
+				
+				close($TABIX);
+			} else {
+				$LOG->logcroak("[ERROR] Unable to run tabix on $localDbSnpVCFFile. Reason: ".$!);
+			}
+		}
+	}
+}
+
+	my %MergedTable = ();
+	my $isMergeRead = undef;
+
+sub doReadMergedTable($) {
+	my($localDbSnpMergedTableFile) = @_;
+	
+	unless(defined($isMergeRead)) {
+		if(open(my $MERGED,'-|','gunzip','-c',$localDbSnpMergedTableFile)) {
+			while(my $line=<$MERGED>) {
+				chomp($line);
+				my($orig,$merged,undef) = split(/\t/,$line,3);
+				my $rsId = 'rs'.$orig;
+				
+				$MergedTable{$rsId} = 'rs'.$merged;
+			}
+			
+			close($MERGED);
+		} else {
+			$LOG->logcroak("[ERROR] Unable to read merged rsIds. Reason: ".$!);
+		}
+		$isMergeRead = 1;
+	}
+}
+
+sub rsIdRemapOne($$$);
+
+sub rsIdRemapOne($$$) {
+	my($snp_id,$localDbSnpVCFFile,$localDbSnpMergedTableFile) = @_;
+	
+	# First pass, dbSNP rsId extraction for recognized files
+	unless(exists($rsIdMapping{$snp_id})) {
+		# Read it only once!
+		doReadMergedTable($localDbSnpMergedTableFile)  unless($isMergeRead);
+		
+		$rsIdMapping{$snp_id} = undef;
+		if(exists($MergedTable{$snp_id})) {
+			$rsIdMapping{$snp_id} = rsIdRemapOne($MergedTable{$snp_id},$localDbSnpVCFFile,$localDbSnpMergedTableFile);
+			
+			return $rsIdMapping{$snp_id};
+		}
+		
+		# This is needed due the unwanted behavior of vcftools, which always creates a log file
+		my $curdir = getcwd();
+		my $ND = File::Temp->newdir(TMPDIR => 1);
+		chdir($ND->dirname);
+		if(open(my $VCF,'-|','vcftools','--gzvcf',$localDbSnpVCFFile,'--snp',$snp_id,'--recode','--recode-INFO','CAF','--stdout')) {
+			while(my $line=<$VCF>) {
+				next  if(substr($line,0,1) eq '#');
+				chomp($line);
+				
+				my($chromosome,$pos,$rsId,$REF,$ALT,undef,undef,$INFO) = split(/\t/,$line,-1);
+				my $p_data = {};
+				
+				$p_data->{'chromosome'} = $chromosome;
+				$p_data->{'pos'} = $pos+0;
+				$p_data->{'rsId'} = [ $rsId ];
+				$p_data->{'dbSnpRef'} = [ $REF ];
+				$p_data->{'dbSnpAlt'} = [ $ALT ];
+				
+				my $MAF = 2.0;
+				if($INFO =~ /CAF=([^;]+)/) {
+					my @alleleFreqs = split(/,/,$1,-1);
+					foreach my $alleleFreq (@alleleFreqs) {
+						next  if($alleleFreq eq '.');
+						
+						# Number normalization
+						$alleleFreq += 0e0;
+						
+						$MAF = $alleleFreq  if($MAF > $alleleFreq);
+					}
+				}
+				
+				# Assigning the minor allele frequency when the impossible value is not there
+				$p_data->{'MAF'} = [ ($MAF < 2.0) ? $MAF : undef ];
+				
+				$rsIdMapping{$snp_id} = $p_data;
+				
+				# Stopping the process, as we already have the line
+				last;
+			}
+			close($VCF);
+		} else {
+			$LOG->logcroak("[ERROR] Unable to run vcftools on $localDbSnpVCFFile. Reason: ".$!);
+		}
+		# Going back to the original directory
+		chdir($curdir);
+	}
+	
+	return $rsIdMapping{$snp_id};
+}
+
+sub rsIdRemapMany(\@$$) {
+	my($p_snp_id,$localDbSnpVCFFile,$localDbSnpMergedTableFile) = @_;
+	
+	if(scalar(@{$p_snp_id}) > 0) {
+		# Read it only once!
+		# http://www.ncbi.nlm.nih.gov/books/NBK279185/#FTP.do_you_have_a_table_of_merged_snps_s
+		doReadMergedTable($localDbSnpMergedTableFile)  unless($isMergeRead);
+		
+		# First pass, dbSNP rsId extraction for recognized files
+		my $one = undef;
+		my $RSIDFILE = File::Temp->new(TEMPLATE => 'WP10-rsid-XXXXXX',SUFFIX => '.txt',TMPDIR => 1);
+		my $rsidFilename = $RSIDFILE->filename();
+		if(open(my $SNPIDFH,'>',$rsidFilename)) {
+			foreach my $snp_id (@{$p_snp_id}) {
+				next  if(exists($rsIdMapping{$snp_id}));
+				
+				my $rsId = $snp_id;
+				
+				# Search the official one, not the old
+				if(exists($MergedTable{$snp_id})) {
+					next  if(exists($rsIdMapping{$snp_id}));
+					$rsId = $MergedTable{$snp_id};
+				}
+				$rsIdMapping{$rsId} = undef;
+				
+				print $SNPIDFH $rsId,"\n";
+				$one = 1;
+			}
+			
+			close($SNPIDFH);
+		} else {
+			$LOG->logcroak("[ERROR] Unable to either create temp $rsidFilename. Reason: ".$!);
+		}
+		
+		if($one) {
+			# This is needed due the unwanted behavior of vcftools, which always creates a log file
+			my $curdir = getcwd();
+			my $ND = File::Temp->newdir(TMPDIR => 1);
+			chdir($ND->dirname);
+			if(open(my $VCF,'-|','vcftools','--gzvcf',$localDbSnpVCFFile,'--snps',$rsidFilename,'--recode','--recode-INFO','CAF','--stdout')) {
+				while(my $line=<$VCF>) {
+					next  if(substr($line,0,1) eq '#');
+					chomp($line);
+					
+					my($chromosome,$pos,$rsId,$REF,$ALT,undef,undef,$INFO) = split(/\t/,$line,-1);
+					my $p_data = {};
+					
+					$p_data->{'chromosome'} = $chromosome;
+					$p_data->{'pos'} = $pos+0;
+					$p_data->{'rsId'} = [ $rsId ];
+					$p_data->{'dbSnpRef'} = [ $REF ];
+					$p_data->{'dbSnpAlt'} = [ $ALT ];
+					
+					my $MAF = 2.0;
+					if($INFO =~ /CAF=([^;]+)/) {
+						my @alleleFreqs = split(/,/,$1,-1);
+						foreach my $alleleFreq (@alleleFreqs) {
+							next  if($alleleFreq eq '.');
+							
+							# Number normalization
+							$alleleFreq += 0e0;
+							
+							$MAF = $alleleFreq  if($MAF > $alleleFreq);
+						}
+					}
+					
+					# Assigning the minor allele frequency when the impossible value is not there
+					$p_data->{'MAF'} = [ ($MAF < 2.0) ? $MAF : undef ];
+					
+					$rsIdMapping{$rsId} = $p_data;
+				}
+				close($VCF);
+			} else {
+				$LOG->logcroak("[ERROR] Unable to run vcftools on $localDbSnpVCFFile. Reason: ".$!);
+			}
+			# Going back to the original directory
+			chdir($curdir);
+		}
+	}
+}
+
+}
+
+sub rangePosParser($) {
+	my $chr;
+	my $start;
+	my $end;
+	
+	if($_[0] =~ /^([^:]+):([1-9][0-9]*):([1-9][0-9]*)$/) {
+		$chr = $1;
+		$start = $2 + 0;
+		$end = $3 + 0;
+	}
+	
+	return ($chr,$start,$end);
+}
+
+# This is initialized at the beginning
+my %GThash = ();
+
+sub genePosParser($) {
+	my($ensemblGeneId) = @_;
+	
+	if(index($ensemblGeneId,'ENSG') == 0) {
+		my $rPointPlace = rindex($ensemblGeneId,'.');
+		$ensemblGeneId = substr($ensemblGeneId,0,$rPointPlace)  if($rPointPlace != -1);
+		
+		my $chr;
+		my $start;
+		my $end;
+		
+		if(exists($GThash{$ensemblGeneId})) {
+			my $p_data = $GThash{$ensemblGeneId};
+			
+			my $p_coordinates = $p_data->{'coordinates'}[0];
+			$chr = $p_coordinates->{'chromosome'};
+			$start = $p_coordinates->{'chromosome_start'};
+			$end = $p_coordinates->{'chromosome_end'};
+		#} else {
+		#	print STDERR "$qtl_source ENSID NOT FOUND $ensemblGeneId\n";
+		}
+		
+		return ($chr,$start,$end);
+	} else {
+		return rangePosParser($ensemblGeneId);
+	}
+}
+
+my %METH_PROBE_POS = ();
+
+sub methProbeCoordReader($) {
+	my($methTab) = @_;
+	
+	if(open(my $ME,'<',$methTab)) {
+		while(my $line=<$ME>) {
+			if(substr($line,0,2) eq 'cg') {
+				chomp($line);
+				my($cgId,$chro,$pos) = split(/\t/,$line);
+				$METH_PROBE_POS{$cgId} = [$chro,$pos+0,$pos+0];
+			}
+		}
+		
+		close($ME);
+	} else {
+		$LOG->logcroak("ERROR: Unable to parse $methTab probe coordinates file. Reason: $!");
+	}
+}
+
+sub methPosParser($) {
+	my($cgId)=@_;
+	
+	my $chr;
+	my $start;
+	my $end;
+	
+	if(exists($METH_PROBE_POS{$cgId})) {
+		($chr,$start,$end) = @{$METH_PROBE_POS{$cgId}};
+	}
+	
+	return ($chr,$start,$end);
+}
+
+sub psiPosParser($) {
+	my($psi) = @_;
+	
+	if(index($psi,'ENSG') == 0 && $psi =~ /^(ENSG[0-9]{11})\.[1-9][0-9]*\.([1-9][0-9]*)_[1-9][0-9]*$/) {
+		my $ensemblGeneId = $1;
+		my $exonNumber = $2;
+		
+		if(exists($GThash{$ensemblGeneId})) {
+			my $p_data;
+			if(scalar(@{$GThash{$ensemblGeneId}{'exons'}})>=$exonNumber) {
+				$p_data = $GThash{$ensemblGeneId}{'exons'}[$exonNumber - 1];
+				
+				my $chr;
+				my $start;
+				my $end;
+				
+				if(exists($p_data->{'coordinates'}) && scalar(@{$p_data->{'coordinates'}}) > 0) {
+					my $p_coordinates = $p_data->{'coordinates'}[0];
+					if(defined($p_coordinates->{'chromosome'})) {
+						$chr = $p_coordinates->{'chromosome'};
+					} else {
+						print STDERR $psi," CHR LOST\n";
+					}
+					$start = $p_coordinates->{'chromosome_start'};
+					$end = $p_coordinates->{'chromosome_end'};
+					
+					return ($chr,$start,$end);
+				} else {
+					# Rely on next rule
+					print STDERR $psi," NO EXON COORDS\n";
+				}
+			} else {
+				$p_data = $GThash{$ensemblGeneId};
+				print STDERR $psi," EXON LOST\n";
+			}
+		} else {
+				print STDERR $psi," UNKNOWN\n";
+		}
+	}
+	
+	if((index($psi,'unknown_') == 0 || index($psi,'ENSG') == 0) && $psi =~ /_([1-9][0-9]*)$/) {
+		my $pos = $1 + 0;
+		return (undef,$pos,$pos);
+	} else {
+		return rangePosParser($psi);
+	}
+}
+
+
+my %pheno2Coords = (
+	'gene'	=>	\&genePosParser,
+	'H3K27ac'	=>	\&rangePosParser,
+	'H3K4me1'	=>	\&rangePosParser,
+	'meth'	=>	\&methPosParser,
+	'psi'	=>	\&psiPosParser,
+);
+
+sub bulkInsertion($\%\%$$\%\@) {
+	my($ini,$p_GThash,$p_trees,$localDbSnpVCFFile,$localDbSnpMergedTableFile,$p_chartMapping,$p_files) = @_;
 	
 	# Database connection setup
 	
@@ -724,7 +1288,7 @@ sub bulkInsertion($\%\%\%\%\%\@) {
 	
 	my %alreadyCleansed = ();
 	my %alreadyTypeCreated = ();
-	
+
 	$LOG->info("File insertion");
 	foreach my $file (@{$p_files}) {
 		my $basename = File::Basename::basename($file);
@@ -734,92 +1298,186 @@ sub bulkInsertion($\%\%\%\%\%\@) {
 		my $colsLine;
 		my $colSep;
 		my $fileType;
+		my $an_group;
 		my $cell_type;
 		my @cell_types = ();
 		my $qtl_source;
 		my $geneIdKey;
 		my $snpIdKey;
 		
+		my $commonKeyIdx;
+		my $compareIdx;
+		my $compare2Idx;
+		my $phenoParser;
+		
 		if($basename =~ /^([^_.]+)[_.]([^_]+)_(.+)_summary\.hdf5\.txt$/) {
+			$fileType = DATA_FILETYPE;
+			$an_group = WP10_ANALYSIS_GROUP;
 			$mappingName = DEFAULT_WP10_TYPE;
 			$cell_type = $1;
 			$qtl_source = $2;
+			
 			$colSep = qr/\t/;
-			$fileType = DATA_FILETYPE;
 			$geneIdKey = 'geneID';
 			$snpIdKey = 'rs';
+		} elsif($basename =~ /^([^_.]+)[_.]([^_]+)_(.+)_all_summary\.txt\.gz$/) {
+			$fileType = BULK_FILETYPE_2;
+			$an_group = WP10_ANALYSIS_GROUP;
+			$mappingName = [ BULK_WP10_TYPE, DEFAULT_WP10_TYPE ];
+			$cell_type = $1;
+			$qtl_source = $2;
+			
+			$colSep = ' ';
+			$geneIdKey = 'phenotypeID';
+			$snpIdKey = 'rsid';
+			$colsLine = join($colSep,'chr_pos_ref_alt',$snpIdKey,$geneIdKey,'p_value','beta','Bonferroni_p_value','FDR','alt_allele_frequency','std_error_of_beta');
+			$commonKeyIdx = 2;
+			$compareIdx = 4;	# It should be 5, but as we remove the phenotypeID column before the comparison, it is one less
+			$compare2Idx = 5;	# It should be 6, but as we remove the phenotypeID column before the comparison, it is one less
+		} elsif($basename =~ /^([^_.]+)[_.]([^_]+)_(.+)_all[^.]*\.txt\.gz$/) {
+			$fileType = BULK_FILETYPE_2;
+			$an_group = 'WASP-' . (index($3,'CHT') != -1 ? 'CHT': 'ASE');
+			$mappingName = [ BULK_WP10_TYPE, DEFAULT_WP10_TYPE ];
+			$cell_type = $1;
+			$qtl_source = $2;
+			
+			$colSep = ' ';
+			$geneIdKey = 'phenotypeID';
+			$snpIdKey = 'rsid';
+			# These files do not have the column of standard error of beta
+			$colsLine = join($colSep,'chr_pos_ref_alt',$snpIdKey,$geneIdKey,'p_value','beta','Bonferroni_p_value','FDR','alt_allele_frequency');
+			$commonKeyIdx = 2;
+			$compareIdx = 4;	# It should be 5, but as we remove the phenotypeID column before the comparison, it is one less
+			$compare2Idx = 5;	# It should be 6, but as we remove the phenotypeID column before the comparison, it is one less
 		} elsif($basename =~ /^([^_.]+)[_.]([^_]+)_(.+)_all_summary\.txt$/) {
+			$fileType = BULK_FILETYPE;
+			$an_group = WP10_ANALYSIS_GROUP;
 			$mappingName = BULK_WP10_TYPE;
 			$cell_type = $1;
 			$qtl_source = $2;
+			
 			$colSep = ' ';
-			$colsLine = 'geneID rs pos beta pv qv_all';
-			$fileType = BULK_FILETYPE;
 			$geneIdKey = 'geneID';
 			$snpIdKey = 'rs';
+			$colsLine = join($colSep,$geneIdKey,$snpIdKey,'pos','beta','pv','qv_all');
+			$commonKeyIdx = 0;
 		} elsif($basename =~ /^([^.]+)\.([^.]+)\.sig5\.tsv$/) {
+			$fileType = SQTLSEEKER_FILETYPE;
+			$an_group = WP10_ANALYSIS_GROUP;
 			$mappingName = DEFAULT_WP10_TYPE;
 			$cell_type = $1;
 			$qtl_source = $2;
+			
 			$colSep = qr/\t/;
-			$fileType = SQTLSEEKER_FILETYPE;
 			$geneIdKey = 'geneId';
 			$snpIdKey = 'snpId';
 		} elsif($basename =~ /^([^_]+)_([^_]+)_hypervar_[^_.]+\.txt\.csv$/) {
+			$fileType = VARIABILITY_FILETYPE;
+			$an_group = 'HVar';
 			$mappingName = VARIABILITY_WP10_TYPE;
 			$cell_type = $1;
 			@cell_types = split(/\+/,$cell_type);
 			$qtl_source = $2;
+			
 			$colSep = qr/\t/;
-			$fileType = VARIABILITY_FILETYPE;
 			$geneIdKey = $qtl_source eq 'meth' ? 'Probe ID' : 'Ensembl ID';
 		} else {
 			$LOG->info("Discarding file $file (unknown type)");
 			next;
 		}
-		my $indexName = $QTL_INDEXES{$mappingName};
+		
+		# Histone prefix and normalization for some cases
+		$qtl_source = 'H3K' . lc(substr($qtl_source,1))  if(substr($qtl_source,0,1) eq 'K');
+		
+		# Maybe is needed, maybe it is not
+		$phenoParser = exists($pheno2Coords{$qtl_source}) ? $pheno2Coords{$qtl_source} : undef;
+		
+		unless(defined($phenoParser)) {
+			die "MAAAAL $file\n";
+		}
+		
+		my $lastMapping = ref($mappingName) eq 'ARRAY' ? (scalar(@{$mappingName})-1) : undef;
+		my $indexName;
+		if(defined($lastMapping)) {
+			$indexName = [ @QTL_INDEXES{@{$mappingName}} ];
+		} else {
+			$indexName = $QTL_INDEXES{$mappingName};
+		}
 		
 		unless($doSimul) {
-			if($doClean && !exists($alreadyCleansed{$indexName})) {
-				if($es->indices->exists('index' => $indexName)) {
-					$LOG->info("Removing index $indexName (and its type mappings)");
-					$es->indices->delete('index' => $indexName);
+			my $p_doCleanse = sub {
+				my($indexName,$mappingName) = @_;
+				
+				if($doClean && !exists($alreadyCleansed{$indexName})) {
+					if($es->indices->exists('index' => $indexName)) {
+						$LOG->info("Removing index $indexName (and its type mappings)");
+						$es->indices->delete('index' => $indexName);
+					}
+					
+					$alreadyCleansed{$indexName} = undef;
 				}
 				
-				$alreadyCleansed{$indexName} = undef;
-			}
-			
-			unless(exists($alreadyTypeCreated{$mappingName})) {
-				unless($es->indices->exists('index' => $indexName)) {
-					$LOG->info("Creating index $indexName");
-					$es->indices->create('index' => $indexName);
-				}
-			
-				$LOG->info("Assuring type mapping $mappingName exists on index $indexName");
-				$es->indices->put_mapping(
-					'index' => $indexName,
-					'type' => $mappingName,
-					'body' => {
-						$mappingName => $QTL_TYPES{$mappingName}
+				unless(exists($alreadyTypeCreated{$mappingName})) {
+					unless($es->indices->exists('index' => $indexName)) {
+						$LOG->info("Creating index $indexName");
+						$es->indices->create('index' => $indexName);
 					}
-				);
-				$alreadyTypeCreated{$mappingName} = undef;
+				
+					$LOG->info("Assuring type mapping $mappingName exists on index $indexName");
+					$es->indices->put_mapping(
+						'index' => $indexName,
+						'type' => $mappingName,
+						'body' => {
+							$mappingName => $QTL_TYPES{$mappingName}
+						}
+					);
+					$alreadyTypeCreated{$mappingName} = undef;
+				}
+			};
+			
+			if(defined($lastMapping)) {
+				foreach my $m (0..$lastMapping) {
+					$p_doCleanse->($indexName->[$m],$mappingName->[$m]);
+				}
+			} else {
+				$p_doCleanse->($indexName,$mappingName);
 			}
 		}
 		
-		$LOG->info("Processing $file (cell type $cell_type, type $fileType, source $qtl_source)");
-		if(open(my $CSV,'<:encoding(UTF-8)',$file)) {
+		$LOG->info("Processing $file (analysis group $an_group, cell type $cell_type, type $fileType, source $qtl_source)");
+		
+		my $openMode;
+		my @openParams;
+		if($file =~ /\.gz$/) {
+			$openMode = '-|';
+			@openParams = ('gunzip','-c',$file);
+		} else {
+			$openMode = '<:encoding(UTF-8)';
+			@openParams = ($file);
+		}
+		
+		if(open(my $CSV,$openMode,@openParams)) {
 			my $bes;
 			
 			# The bulk helper (for massive insertions)
 			unless($doSimul) {
-				my @bes_params = (
-					index   => $indexName,
-					type    => $mappingName,
-				);
-				push(@bes_params,'max_count' => $ini->val($BP::Loader::Mapper::SECTION,BP::Loader::Mapper::BATCH_SIZE_KEY))  if($ini->exists($BP::Loader::Mapper::SECTION,BP::Loader::Mapper::BATCH_SIZE_KEY));
+				my $p_connect = sub {
+					my($indexName,$mappingName) = @_;
+					
+					my @bes_params = (
+						index   => $indexName,
+						type    => $mappingName,
+					);
+					push(@bes_params,'max_count' => $ini->val($BP::Loader::Mapper::SECTION,BP::Loader::Mapper::BATCH_SIZE_KEY))  if($ini->exists($BP::Loader::Mapper::SECTION,BP::Loader::Mapper::BATCH_SIZE_KEY));
+					
+					return $es->bulk_helper(@bes_params);
+				};
 				
-				$bes = $es->bulk_helper(@bes_params);
+				if(defined($lastMapping)) {
+					$bes = [ map { $p_connect->($indexName->[$_],$mappingName->[$_]) } (0..$lastMapping) ];
+				} else {
+					$bes = $p_connect->($indexName,$mappingName);
+				}
 			}
 
 			unless(defined($colsLine)) {
@@ -831,6 +1489,243 @@ sub bulkInsertion($\%\%\%\%\%\@) {
 			
 			my $bulkGeneId='';
 			my $bulkData;
+			
+			my $p_bestVals;
+			my $bestCompareVal;
+			my $bestCompare2Val;
+			
+			my $p_lastProc = undef;
+			my $p_postProc = undef;
+			if($fileType eq BULK_FILETYPE) {
+				$p_lastProc = sub {
+					if(defined($bulkData)) {
+						my %entry = (
+							'cell_type' => $cell_type,
+							'qtl_source' => $qtl_source,
+							'an_group' => $an_group,
+							'gene_id' => $bulkGeneId,
+							'qtl_data' => $bulkData,
+						);
+						
+						if($doSimul) {
+							print STDERR $J->encode(\%entry),"\n";
+						} else {
+							$bes->index({ 'source' => \%entry });
+						}
+					}
+				};
+			} elsif($fileType eq BULK_FILETYPE_2) {
+				my @batchBestVals = ();
+				my @batchRsIds = ();
+				my @batchChrPos = ();
+				$p_lastProc = sub {
+					if(defined($p_bestVals)) {
+						# First, we save the bulk entry
+						my %bulkEntry = (
+							'cell_type' => $cell_type,
+							'qtl_source' => $qtl_source,
+							'an_group' => $an_group,
+							'gene_id' => $bulkGeneId,
+							'qtl_data' => $bulkData,
+						);
+						
+						if($doSimul) {
+							#print STDERR $J->encode(\%bulkEntry),"\n";
+						} else {
+							$bes->[0]->index({ 'source' => \%bulkEntry });
+						}
+						
+						push(@batchBestVals,[$bulkGeneId,$p_bestVals]);
+						my $rsId = $p_bestVals->[1];
+						if(index($rsId,'rs')==0) {
+							push(@batchRsIds,$rsId);
+						} elsif($rsId =~ /^chr([^-]+)-([0-9]+)$/) {
+							push(@batchChrPos,[$1,$2+0]);
+						}
+					}
+				};
+				
+				$p_postProc = sub {
+					# Prefilling the caches
+					rsIdRemapMany(@batchRsIds,$localDbSnpVCFFile,$localDbSnpMergedTableFile);
+					posMapMany(@batchChrPos,$localDbSnpVCFFile);
+					
+					foreach my $p_pair (@batchBestVals) {
+						my($bulkGeneId,$p_bestVals) = @{$p_pair};
+						# And now, let's store the winner!
+						my($snp,$rsId) = @{$p_bestVals}[0..1];
+						my($chr,$start,$end) = $phenoParser->($bulkGeneId);
+						
+						# Fixing rescued values from psi
+						unless(defined($chr)) {
+							if(defined($start)) {
+								($chr) = split(':',$snp);
+							}
+						}
+						
+						# Skip insertion when we could not find the chromosome
+						if(defined($chr)) {
+							my %entry = (
+								'cell_type' => $cell_type,
+								'qtl_source' => $qtl_source,
+								'an_group' => $an_group,
+								'gene_id' => $bulkGeneId,
+								'snp_id' => $rsId,
+								'snp_def' => $snp,
+							);
+							
+							my $snpRef;
+							my $snpAlt;
+							if($snp =~ /^([^:]+):([0-9]+)_([^_]+)_([^_]+)$/) {
+								$entry{'pos'} = $2 + 0;
+								$entry{'snpRef'} = $snpRef = $3;
+								$entry{'snpAlt'} = $snpAlt = $4;
+							}
+							
+							my($pv,$beta,$pv_bonf,$FDR,$alt_allele_frequency,$std_error_of_beta)=@{$p_bestVals}[2..7];
+							$entry{'altAF'} = $alt_allele_frequency + 0.0;
+							
+							# Now, let's set the dbSNP additional data
+							my $doCoordMapping = undef;
+							my $doRsIdMapping = undef;
+							if($rsId =~ /^rs[0-9]+$/) {
+								$doCoordMapping = rsIdRemapOne($rsId,$localDbSnpVCFFile,$localDbSnpMergedTableFile);
+								unless(defined($doCoordMapping)) {
+									$entry{'rsId'} = [ $rsId ];
+								}
+							} elsif($rsId =~ /^chr([^-]+)-([0-9]+)$/) {
+								$entry{'pos'} = $2  unless(exists($entry{'pos'}));
+								
+								# We need the chromosome from this perspective
+								$doRsIdMapping = posMapOne($1,$2,$localDbSnpVCFFile);
+							} elsif($rsId =~ /^snp([0-9]+)_chr(.+)$/) {
+								# Curating the format of anonymous SNPs
+								$entry{'pos'} = $1  unless(exists($entry{'pos'}));
+								
+								# We need the chromosome from this perspective
+								$doRsIdMapping = posMapOne($2,$1,$localDbSnpVCFFile);
+							} elsif($rsId =~ /^([^:]+):([0-9]+)$/) {
+								$entry{'pos'} = $2  unless(exists($entry{'pos'}));
+								
+								# We need the chromosome from this perspective
+								$doRsIdMapping = posMapOne($1,$2,$localDbSnpVCFFile);
+							}
+							
+							if(defined($doCoordMapping)) {
+								my $p_mapping = $doCoordMapping;
+								foreach my $key ('pos','rsId','dbSnpRef','dbSnpAlt','MAF') {
+									$entry{$key} = $p_mapping->{$key};
+								}
+							} elsif(defined($doRsIdMapping)) {
+								my $p_mapping = $doRsIdMapping;
+								
+								if(defined($snpRef)) {
+									foreach my $key ('rsId','dbSnpRef','dbSnpAlt','MAF') {
+										$entry{$key} = [];
+									}
+									
+									my $maxIdx = scalar(@{$p_mapping->{'rsId'}}) - 1;
+									foreach my $idx (0..$maxIdx) {
+										if($snpRef eq $p_mapping->{'dbSnpRef'}[$idx] && $snpAlt eq $p_mapping->{'dbSnpAlt'}[$idx]) {
+											foreach my $key ('rsId','dbSnpRef','dbSnpAlt','MAF') {
+												push(@{$entry{$key}},$p_mapping->{$key}[$idx]);
+											}
+										}
+									}
+								} else {
+									foreach my $key ('rsId','dbSnpRef','dbSnpAlt','MAF') {
+										$entry{$key} = $p_mapping->{$key};
+									}
+								}
+							}
+							
+							$entry{'gene_chrom'} = $chr;
+							$entry{'gene_start'} = $start;
+							$entry{'gene_end'} = $end;
+							$entry{'pv'} = $pv_bonf;
+							$entry{'metrics'} = {
+								'beta' => $beta+0.0,
+								'pv' => $pv+0.0,
+								'pv_bonf' => $pv_bonf,
+								'FDR' => $FDR,
+							};
+							$entry{'metrics'}{'std_error_beta'} = $std_error_of_beta + 0.0   if(defined($std_error_of_beta));
+							
+							if($qtl_source eq 'gene') {
+								$entry{'ensemblGeneId'} = $bulkGeneId;
+							} elsif($qtl_source eq 'meth') {
+								$entry{'probeId'} = $bulkGeneId;
+							} elsif($qtl_source eq 'psi') {
+								$entry{'splice'} = $bulkGeneId;
+								my $lastdot = rindex($bulkGeneId,'.');
+								if($lastdot != -1) {
+									$entry{'ensemblGeneId'} = substr($bulkGeneId,0,$lastdot);
+									my $tail = substr($bulkGeneId,$lastdot+1);
+									my $firstUnder = index($tail,'_');
+									$entry{'exonNumber'} = substr($tail,0,$firstUnder) + 0;
+								}
+							} else {
+								# Histones
+								$entry{'histone'} = $qtl_source;
+							}
+							
+							if(exists($entry{'ensemblGeneId'})) {
+								my $ensemblGeneId = $entry{'ensemblGeneId'};
+								# Fetching the gene coordinates
+								my $rPointPlace = rindex($ensemblGeneId,'.');
+								$ensemblGeneId = substr($ensemblGeneId,0,$rPointPlace)  if($rPointPlace != -1);
+								
+								if(exists($p_GThash->{$ensemblGeneId})) {
+									my $p_data = $p_GThash->{$ensemblGeneId};
+									unless(exists($entry{'gene_chrom'}) && exists($entry{'gene_start'}) && exists($entry{'gene_end'})) {
+										my $p_coordinates = $p_data->{'coordinates'}[0];
+										$entry{'gene_chrom'} = $p_coordinates->{'chromosome'};
+										$entry{'gene_start'} = $p_coordinates->{'chromosome_start'};
+										$entry{'gene_end'} = $p_coordinates->{'chromosome_end'};
+									}
+									
+									$entry{'gene_name'} = getMainSymbol($p_data)  unless(exists($entry{'gene_name'}));
+								} else {
+									print STDERR "$qtl_source ENSID NOT FOUND $ensemblGeneId\n";
+								}
+							} elsif(exists($p_trees->{$entry{'gene_chrom'}})) {
+								my $tree = $p_trees->{$entry{'gene_chrom'}};
+								
+								# Fetching the genes overlapping these coordinates
+								my @geneNames = ();
+								my @ensemblGeneIds = ();
+								
+								my $p_p_data = $tree->fetch($entry{'gene_start'},$entry{'gene_end'}+1);
+								foreach my $p_data (@{$p_p_data}) {
+									my $p_coordinates = $p_data->{'coordinates'}[0];
+									
+									push(@ensemblGeneIds,$p_coordinates->{'feature_id'});
+									push(@geneNames,getMainSymbol($p_data));
+								}
+								
+								if(scalar(@ensemblGeneIds)>0) {
+									if(scalar(@ensemblGeneIds)>1) {
+										$entry{'ensemblGeneId'} = \@ensemblGeneIds;
+										$entry{'gene_name'} = \@geneNames;
+									} else {
+										$entry{'ensemblGeneId'} = $ensemblGeneIds[0];
+										$entry{'gene_name'} = $geneNames[0];
+									}
+								}
+							} else {
+								$LOG->info("Mira cell_type => $cell_type, qtl_source => $qtl_source, gene_id => $entry{gene_id}");
+							}
+							
+							# And now, the insertion
+							if($doSimul) {
+								print STDERR $J->encode(\%entry),"\n";
+							} else {
+								$bes->[1]->index({ 'source' => \%entry });
+							}
+						}
+					}
+				};
+			}
 			
 			while(my $line=<$CSV>) {
 				chomp($line);
@@ -854,26 +1749,58 @@ sub bulkInsertion($\%\%\%\%\%\@) {
 				#	}
 				#}
 				
-				if($fileType eq BULK_FILETYPE) {
-					if($vals[0] ne $bulkGeneId) {
-						if(defined($bulkData)) {
-							my %entry = (
-								'cell_type' => $cell_type,
-								'qtl_source' => $qtl_source,
-								'gene_id' => $bulkGeneId,
-								'qtl_data' => $bulkData,
-							);
-							
-							if($doSimul) {
-								print STDERR $J->encode(\%entry),"\n";
-							} else {
-								$bes->index({ 'source' => \%entry });
-							}
-						}
-						$bulkGeneId = $vals[0];
+				if($fileType eq BULK_FILETYPE_2) {
+					if($vals[$commonKeyIdx] ne $bulkGeneId) {
+						$p_lastProc->();
+						
+						# Saving for later usage
+						$bulkGeneId = $vals[$commonKeyIdx];
+						
+						# We assure it is properly filled
+						# so the first case overwrites them
+						$bulkData = '';
+						$p_bestVals = undef;
+						$bestCompareVal = 1.1;
+						$bestCompare2Val = 1.1;
+					}
+					splice(@vals,$commonKeyIdx,1);
+					$bulkData .= join('\t',@vals) . "\n";
+
+					# Fixing bonferroni.p glitches before deciding
+					my $compareVal = $vals[$compareIdx];
+					my $compare2Val = $vals[$compare2Idx];
+					my $lengthCompareVal = length($compareVal);
+					if(substr($compareVal,$lengthCompareVal-3,3) eq 'e-0') {
+						$compareVal .= '1';
+					} elsif(substr($compareVal,$lengthCompareVal-2,2) eq 'e-') {
+						$compareVal .= '01';
+					} elsif(substr($compareVal,$lengthCompareVal-1,1) eq 'e') {
+						$compareVal .= '-01';
+					} elsif(($compareVal + 0.0) > 1.0 ) {
+						$compareVal .= 'e-01';
+					}
+					
+					$compareVal += 0.0;
+					$compare2Val += 0.0;
+					# The lower, the best!!!!
+					if($compareVal < $bestCompareVal || ($compareVal == $bestCompareVal && $compare2Val < $bestCompare2Val)) {
+						$bestCompareVal = $compareVal;
+						$bestCompare2Val = $compare2Val;
+						
+						# Saving the curated bonferroni.p
+						$vals[$compareIdx] = $compareVal;
+						$vals[$compare2Idx] = $compare2Val;
+						$p_bestVals = \@vals;
+					}
+				} elsif($fileType eq BULK_FILETYPE) {
+					if($vals[$commonKeyIdx] ne $bulkGeneId) {
+						$p_lastProc->();
+						
+						$bulkGeneId = $vals[$commonKeyIdx];
 						$bulkData = '';
 					}
-					$bulkData .= join('\t',@vals[1..$#vals]) . "\n";
+					splice(@vals,$commonKeyIdx,1);
+					$bulkData .= join('\t',@vals) . "\n";
 				} elsif($fileType eq VARIABILITY_FILETYPE) {
 					my %data = ();
 					@data{@cols} = @vals;
@@ -976,6 +1903,7 @@ sub bulkInsertion($\%\%\%\%\%\@) {
 					my %entry = (
 						'cell_type' => $cell_type,
 						'qtl_source' => $qtl_source,
+						'an_group' => $an_group,
 						'gene_id' => $data{$geneIdKey},
 						'snp_id' => $data{$snpIdKey},
 					);
@@ -984,9 +1912,8 @@ sub bulkInsertion($\%\%\%\%\%\@) {
 					my $doCoordMapping = undef;
 					my $doRsIdMapping = undef;
 					if($entry{'snp_id'} =~ /^rs[0-9]+$/) {
-						if(exists($p_rsIdMapping->{$entry{'snp_id'}})) {
-							$doCoordMapping = 1;
-						} else {
+						$doCoordMapping = rsIdRemapOne($entry{'snp_id'},$localDbSnpVCFFile,$localDbSnpMergedTableFile);
+						unless(defined($doCoordMapping)) {
 							$entry{'rsId'} = [ $entry{'snp_id'} ];
 						}
 					} elsif($entry{'snp_id'} =~ /^snp([0-9]+)_chr(.+)$/) {
@@ -994,21 +1921,21 @@ sub bulkInsertion($\%\%\%\%\%\@) {
 						$entry{'pos'} = $1;
 						
 						# We need the chromosome from this perspective
-						$doRsIdMapping = $2;
+						$doRsIdMapping = posMapOne($2,$1,$localDbSnpVCFFile);
 					} elsif($entry{'snp_id'} =~ /^([^:]+):([0-9]+)$/) {
-						$entry{'pos'} = $2  unless(exists($entry{'pos'}));
+						$entry{'pos'} = $2;
 						
 						# We need the chromosome from this perspective
-						$doRsIdMapping = $1;
+						$doRsIdMapping = posMapOne($1,$2,$localDbSnpVCFFile);
 					}
 					
 					if(defined($doCoordMapping)) {
-						my $p_mapping = $p_rsIdMapping->{$entry{'snp_id'}};
+						my $p_mapping = $doCoordMapping;
 						foreach my $key ('pos','rsId','dbSnpRef','dbSnpAlt','MAF') {
 							$entry{$key} = $p_mapping->{$key};
 						}
-					} elsif(defined($doRsIdMapping) && exists($p_coordMapping->{$doRsIdMapping}) && exists($p_coordMapping->{$doRsIdMapping}{$entry{'pos'}}) && defined($p_coordMapping->{$doRsIdMapping}{$entry{'pos'}})) {
-						my $p_mapping = $p_coordMapping->{$doRsIdMapping}{$entry{'pos'}};
+					} elsif(defined($doRsIdMapping)) {
+						my $p_mapping = $doRsIdMapping;
 						foreach my $key ('rsId','dbSnpRef','dbSnpAlt','MAF') {
 							$entry{$key} = $p_mapping->{$key};
 						}
@@ -1019,12 +1946,12 @@ sub bulkInsertion($\%\%\%\%\%\@) {
 						$entry{'gene_start'} = $data{'gene_start'}+0;
 						$entry{'gene_end'} = $data{'gene_end'}+0;
 						$entry{'pos'} = $data{'pos'}+0;
-						$entry{'pv'} = $data{'pv'}+0E0;
-						$entry{'qv'} = $data{'qv_all'}+0E0;
+						$entry{'pv'} = $data{'pv'}+0.0;
+						$entry{'qv'} = $data{'qv_all'}+0.0;
 						$entry{'metrics'} = {
-							'beta' => $data{'beta'}+0E0,
-							'pv_bonf' => $data{'pv_bonf'}+0E0,
-							'pv_storey' => $data{'pv_storey'}+0E0,
+							'beta' => $data{'beta'}+0.0,
+							'pv_bonf' => $data{'pv_bonf'}+0.0,
+							'pv_storey' => $data{'pv_storey'}+0.0,
 						};
 						
 						if($qtl_source eq 'cufflinks') {
@@ -1043,7 +1970,7 @@ sub bulkInsertion($\%\%\%\%\%\@) {
 							$entry{'splice'} = $data{$geneIdKey};
 						} else {
 							# Histones
-							$entry{'histone'} = 'H3'.$qtl_source;
+							$entry{'histone'} = $qtl_source;
 						}
 						
 					} elsif($fileType eq SQTLSEEKER_FILETYPE) {
@@ -1131,22 +2058,20 @@ sub bulkInsertion($\%\%\%\%\%\@) {
 				#print Dumper(\%entry),"\n";
 			}
 			# Bulk data special case
-			if(defined($bulkData)) {
-				my %entry = (
-					'cell_type' => $cell_type,
-					'qtl_source' => $qtl_source,
-					'gene_id' => $bulkGeneId,
-					'qtl_data' => $bulkData,
-				);
-				
-				if($doSimul) {
-					print STDERR $J->encode(\%entry),"\n";
-				} else {
-					$bes->index({ 'source' => \%entry });
-				}
+			if(defined($p_lastProc)) {
+				$p_lastProc->();
+				$p_postProc->()  if(defined($p_postProc));
 			}
 			
-			$bes->flush()  unless($doSimul);
+			unless($doSimul) {
+				if(defined($lastMapping)) {
+					foreach my $iMapping (0..$lastMapping) {
+						$bes->[$iMapping]->flush();
+					}
+				} else {
+					$bes->flush();
+				}
+			}
 			
 			close($CSV);
 		} else {
@@ -1196,7 +2121,13 @@ if(scalar(@ARGV)>=3) {
 	} else {
 		$LOG->logcroak("Configuration file $iniFile must have '".DBSNP_MERGED_TABLE_TAG."'");
 	}
-	
+	if($ini->exists(BP::DCCLoader::Parsers::DCC_LOADER_SECTION,MANIFEST_TAG)) {
+		my $manifest_file = $ini->val(BP::DCCLoader::Parsers::DCC_LOADER_SECTION,MANIFEST_TAG);
+		
+		methProbeCoordReader($manifest_file);
+	} else {
+		$LOG->logcroak("Configuration file $iniFile must have '".MANIFEST_TAG."'");
+	}
 	
 	# Filtering images directories from the files
 	my @files = ();
@@ -1295,15 +2226,58 @@ if(scalar(@ARGV)>=3) {
 		$ftpServer = undef;
 	}
 	
-	# Defined outside
-	my($p_Gencode,$p_PAR,$p_GThash) = BP::DCCLoader::Parsers::GencodeGTFParser::getGencodeCoordinates($model,$workingDir,$ini);
-	# Collapsing Gencode unique genes and transcripts into Ensembl's hash
-	@{$p_GThash}{keys(%{$p_PAR})} = values(%{$p_PAR});
+	# GThash is defined outside
+	{
+		my($p_Gencode,$p_PAR,$p_GThash) = BP::DCCLoader::Parsers::GencodeGTFParser::getGencodeCoordinates($model,$workingDir,$ini);
+
+		# Collapsing Gencode unique genes and transcripts into Ensembl's hash
+		#@{$p_GThash}{keys(%{$p_PAR})} = values(%{$p_PAR});
+		
+		# First pass a, gathering genes
+		foreach my $p_entry (values(%{$p_GThash}),values(%{$p_PAR})) {
+			my $feature = $p_entry->{'feature'};
+			if($feature eq 'gene') {
+				my $feature_cluster_id = $p_entry->{'feature_cluster_id'};
+				my $rPointPlace = rindex($feature_cluster_id,'.');
+				$feature_cluster_id = substr($feature_cluster_id,0,$rPointPlace)  if($rPointPlace != -1);
+				
+				unless(exists($GThash{$feature_cluster_id})) {
+					$p_entry->{'exons'} = [];
+					
+					$GThash{$feature_cluster_id} = $p_entry;
+				}
+			}
+		}
+		
+		# First pass b, gathering exons
+		foreach my $p_entry (@{$p_Gencode}) {
+			my $feature = $p_entry->{'feature'};
+			if($feature eq 'exon') {
+				my $feature_cluster_id = $p_entry->{'feature_cluster_id'};
+				my $rPointPlace = rindex($feature_cluster_id,'.');
+				$feature_cluster_id = substr($feature_cluster_id,0,$rPointPlace)  if($rPointPlace != -1);
+				
+				push(@{$GThash{$feature_cluster_id}{'exons'}}, $p_entry);
+			}
+		}
+		# Second pass, ordering the exons by their initial position
+		foreach my $p_entry (values(%GThash)) {
+			@{$p_entry->{'exons'}} = sort {
+				my $aCoords = $a->{'coordinates'}[0];
+				my $bCoords = $b->{'coordinates'}[0];
+				if($aCoords->{'chromosome_start'} != $bCoords->{'chromosome_start'}) {
+					$aCoords->{'chromosome_start'} - $bCoords->{'chromosome_start'};
+				} else {
+					$aCoords->{'chromosome_end'} - $bCoords->{'chromosome_end'};
+				}
+			} @{$p_entry->{'exons'}};
+		}
+	}
 	
 	# Now, we are going to have a forest, where each interval tree is a chromosome
 	$LOG->info("Generating interval forest");
 	my %trees = ();
-	foreach my $node (values(%{$p_GThash})) {
+	foreach my $node (values(%GThash)) {
 		if($node->{feature} eq 'gene') {
 			my $p_coord = $node->{coordinates}[0];
 			my $tree;
@@ -1321,10 +2295,10 @@ if(scalar(@ARGV)>=3) {
 	$LOG->info("Interval forest ready!");
 	
 	# First pass, dbSNP rsId extraction for recognized files
-	my($p_rsIdMapping,$p_coordMapping) = rsIdRemapper($localDbSnpVCFFile,$localDbSnpMergedTableFile,@files);
+	# my($p_rsIdMapping,$p_coordMapping) = rsIdRemapper($localDbSnpVCFFile,$localDbSnpMergedTableFile,@files);
 	
 	# Second pass, file insertion
-	bulkInsertion($ini,%{$p_GThash},%trees,%{$p_rsIdMapping},%{$p_coordMapping},%chartMapping,@files);
+	bulkInsertion($ini,%GThash,%trees,$localDbSnpVCFFile,$localDbSnpMergedTableFile,%chartMapping,@files);
 	$LOG->info("Insertions finished");
 } else {
 	print STDERR "Usage: $0 [-C] [-s] {ini file} {caching dir} {images_dirs}* {tab file}+\n";
